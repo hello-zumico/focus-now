@@ -110,6 +110,7 @@ Item {
   }
 
   function holdHoverFocus() {
+    hoverWatchdog.restart()
     if (root.hoverHeld) {
       setMouseConfig(1, true)
       return
@@ -119,6 +120,7 @@ Item {
   }
 
   function releaseHoverFocus() {
+    hoverWatchdog.stop()
     if (!root.hoverHeld) return
     root.hoverHeld = false
     setMouseConfig(root.savedFollowMouse >= 0 ? root.savedFollowMouse : 1, root.savedMouseRefocus)
@@ -224,6 +226,7 @@ Item {
       normalized: hyprAddress(lastHandledAddress),
       applying: applying,
       hoverHeld: hoverHeld,
+      hoverWatchdog: hoverWatchdog.running,
       node: binNode
     })
   }
@@ -258,6 +261,15 @@ Item {
     onTriggered: root.startAction()
   }
 
+  Timer {
+    id: hoverWatchdog
+    interval: 500
+    repeat: true
+    onTriggered: {
+      if (root.hoverHeld && !hoverProbe.running) hoverProbe.running = true
+    }
+  }
+
   Process {
     id: actionProc
     stdout: StdioCollector {
@@ -278,6 +290,25 @@ Item {
 
   Process {
     id: mouseProc
+  }
+
+  Process {
+    id: hoverProbe
+    command: [root.binTimeout, "-k", "2", "3", "/usr/bin/bash", "-c",
+      root.binHyprctl + " getoption input:follow_mouse -j; printf '\\n---S---\\n'; " +
+      root.binHyprctl + " getoption input:mouse_refocus -j"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (!root.hoverHeld || !root.config.enabled || !root.config.hoverFocus) return
+        var parts = String(text || "").split("\n---S---\n")
+        var follow = Model.parseJson(parts[0] || "{}", {})
+        var refocus = Model.parseJson(parts.length > 1 ? parts[1] : "{}", {})
+        if (Number(follow && follow.int) !== 1 || !(refocus && refocus.bool === true)) {
+          root.setMouseConfig(1, true)
+        }
+      }
+    }
   }
 
   Process {
@@ -350,9 +381,11 @@ Item {
 
   Component.onDestruction: {
     debounce.running = false
+    hoverWatchdog.stop()
     if (actionProc.running) actionProc.running = false
     if (captureMouseProc.running) captureMouseProc.running = false
     if (mouseProc.running) mouseProc.running = false
+    if (hoverProbe.running) hoverProbe.running = false
     if (snapshotProbe.running) snapshotProbe.running = false
     root.clearManagedWindow(true)
     if (root.hoverHeld) {

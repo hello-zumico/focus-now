@@ -31,6 +31,7 @@ Item {
   property string lastHandledAddress: ""
   property bool applying: false
   property bool hoverHeld: false
+  property bool hoverBridgeInstalled: false
   property string managedAddress: ""
   property string managedMode: ""
   property int savedFollowMouse: -1
@@ -109,28 +110,36 @@ Item {
     nodeProbe.running = true
   }
 
+  function installHoverBridge() {
+    root.hoverBridgeInstalled = true
+    hoverBridgeProc.command = [root.binTimeout, "-k", "2", "3", root.binHyprctl, "eval",
+      Model.installHoverBridgeEval()]
+    hoverBridgeProc.running = false
+    hoverBridgeProc.running = true
+  }
+
+  function uninstallHoverBridge() {
+    root.hoverBridgeInstalled = false
+    hoverBridgeProc.command = [root.binTimeout, "-k", "2", "3", root.binHyprctl, "eval",
+      Model.uninstallHoverBridgeEval(root.savedFollowMouse >= 0 ? root.savedFollowMouse : 1, root.savedMouseRefocus)]
+    hoverBridgeProc.running = false
+    hoverBridgeProc.running = true
+  }
+
   function holdHoverFocus() {
-    hoverWatchdog.restart()
-    if (root.hoverHeld) {
-      setMouseConfig(1, true)
+    if (!root.hoverHeld) {
+      captureMouseProc.running = false
+      captureMouseProc.running = true
       return
     }
-    captureMouseProc.running = false
-    captureMouseProc.running = true
+    if (config.includeFloating) installHoverBridge()
+    else uninstallHoverBridge()
   }
 
   function releaseHoverFocus() {
-    hoverWatchdog.stop()
-    if (!root.hoverHeld) return
+    if (!root.hoverHeld && !root.hoverBridgeInstalled) return
     root.hoverHeld = false
-    setMouseConfig(root.savedFollowMouse >= 0 ? root.savedFollowMouse : 1, root.savedMouseRefocus)
-  }
-
-  function setMouseConfig(followMouse, refocus) {
-    mouseProc.command = [root.binTimeout, "-k", "2", "3", root.binHyprctl, "eval",
-      "hl.config({ input = { follow_mouse = " + Number(followMouse) + ", mouse_refocus = " + (refocus ? "true" : "false") + " } })"]
-    mouseProc.running = false
-    mouseProc.running = true
+    uninstallHoverBridge()
   }
 
   function hyprAddress(address) {
@@ -226,7 +235,7 @@ Item {
       normalized: hyprAddress(lastHandledAddress),
       applying: applying,
       hoverHeld: hoverHeld,
-      hoverWatchdog: hoverWatchdog.running,
+      hoverBridge: hoverBridgeInstalled,
       node: binNode
     })
   }
@@ -262,11 +271,11 @@ Item {
   }
 
   Timer {
-    id: hoverWatchdog
-    interval: 500
-    repeat: true
+    id: hoverBridgeReload
+    interval: 250
+    repeat: false
     onTriggered: {
-      if (root.hoverHeld && !hoverProbe.running) hoverProbe.running = true
+      if (root.config.enabled && root.config.hoverFocus) root.installHoverBridge()
     }
   }
 
@@ -289,24 +298,11 @@ Item {
   }
 
   Process {
-    id: mouseProc
-  }
-
-  Process {
-    id: hoverProbe
-    command: [root.binTimeout, "-k", "2", "3", "/usr/bin/bash", "-c",
-      root.binHyprctl + " getoption input:follow_mouse -j; printf '\\n---S---\\n'; " +
-      root.binHyprctl + " getoption input:mouse_refocus -j"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (!root.hoverHeld || !root.config.enabled || !root.config.hoverFocus) return
-        var parts = String(text || "").split("\n---S---\n")
-        var follow = Model.parseJson(parts[0] || "{}", {})
-        var refocus = Model.parseJson(parts.length > 1 ? parts[1] : "{}", {})
-        if (Number(follow && follow.int) !== 1 || !(refocus && refocus.bool === true)) {
-          root.setMouseConfig(1, true)
-        }
+    id: hoverBridgeProc
+    onExited: function(code) {
+      if (code !== 0 && root.hoverBridgeInstalled) {
+        root.hoverBridgeInstalled = false
+        root.log("could not install floating hover bridge")
       }
     }
   }
@@ -323,6 +319,7 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (!root.config.enabled || !root.config.hoverFocus) return
         var parts = String(text || "").split("\n---S---\n")
         var follow = Model.parseJson(parts[0] || "{}", {})
         var refocus = Model.parseJson(parts.length > 1 ? parts[1] : "{}", {})
@@ -330,7 +327,7 @@ Item {
         if (isFinite(savedFollow)) root.savedFollowMouse = savedFollow
         if (refocus && typeof refocus.bool === "boolean") root.savedMouseRefocus = refocus.bool
         root.hoverHeld = true
-        root.setMouseConfig(1, true)
+        if (root.config.includeFloating) root.installHoverBridge()
       }
     }
     onExited: function(code) {
@@ -354,6 +351,10 @@ Item {
     target: Hyprland
     function onRawEvent(event) {
       var name = String(event && event.name ? event.name : "")
+      if (name === "configreloaded") {
+        if (root.hoverBridgeInstalled) hoverBridgeReload.restart()
+        return
+      }
       if (name !== "activewindowv2" && name !== "activewindow") return
       var data = []
       try {
@@ -381,19 +382,18 @@ Item {
 
   Component.onDestruction: {
     debounce.running = false
-    hoverWatchdog.stop()
+    hoverBridgeReload.stop()
     if (actionProc.running) actionProc.running = false
     if (captureMouseProc.running) captureMouseProc.running = false
-    if (mouseProc.running) mouseProc.running = false
-    if (hoverProbe.running) hoverProbe.running = false
+    if (hoverBridgeProc.running) hoverBridgeProc.running = false
     if (snapshotProbe.running) snapshotProbe.running = false
     root.clearManagedWindow(true)
-    if (root.hoverHeld) {
+    if (root.hoverHeld || root.hoverBridgeInstalled) {
       root.hoverHeld = false
-      mouseProc.command = [root.binTimeout, "-k", "2", "3", root.binHyprctl, "eval",
-        "hl.config({ input = { follow_mouse = " + Number(root.savedFollowMouse >= 0 ? root.savedFollowMouse : 1) +
-        ", mouse_refocus = " + (root.savedMouseRefocus ? "true" : "false") + " } })"]
-      mouseProc.startDetached()
+      root.hoverBridgeInstalled = false
+      hoverBridgeProc.command = [root.binTimeout, "-k", "2", "3", root.binHyprctl, "eval",
+        Model.uninstallHoverBridgeEval(root.savedFollowMouse >= 0 ? root.savedFollowMouse : 1, root.savedMouseRefocus)]
+      hoverBridgeProc.startDetached()
     }
   }
 

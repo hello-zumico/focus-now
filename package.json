@@ -1,6 +1,6 @@
 {
   "name": "focus-now",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Omarchy plugin: hover focus, centering, fullscreen, and proportional window expansion",
   "scripts": {

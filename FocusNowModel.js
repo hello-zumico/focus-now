@@ -453,6 +453,47 @@ function resizeEval(ops) {
   return out.join('; ')
 }
 
+function mouseConfigEval(followMouse, refocus) {
+  return 'hl.config({ input = { follow_mouse = ' + Number(followMouse) +
+    ', mouse_refocus = ' + (refocus ? 'true' : 'false') + ' } })'
+}
+
+function activeWorkspaceFloatsEval() {
+  return 'local function active_workspace_floats() local workspace = hl.get_active_workspace(); if not workspace then return false end; for _, window in ipairs(hl.get_workspace_windows(tostring(workspace.id))) do for _, tag in ipairs(window.tags or {}) do if tag == "omarchy-floating-workspace" then return true end end end; local state_home = os.getenv("XDG_STATE_HOME"); if not state_home or state_home == "" then state_home = (os.getenv("HOME") or "") .. "/.local/state" end; local file = io.open(state_home .. "/omarchy/workspace-layouts/" .. tostring(workspace.id) .. ".lua", "r"); if file then local text = file:read("*a") or ""; file:close(); return text:match([[mode%s*=%s*"floating"]]) ~= nil end; file = io.open(state_home .. "/omarchy/workspace-layouts/default.lua", "r"); if file then local text = file:read("*a") or ""; file:close(); return text:match([[default%s*=%s*"floating"]]) ~= nil end; return false end'
+}
+
+function installHoverBridgeEval() {
+  return [
+    'local bridge = rawget(_G, "focus_now_hover_bridge") or {}',
+    'local function remove(subscription) if subscription then pcall(function() subscription:remove() end) end end',
+    'remove(bridge.workspace_subscription); remove(bridge.monitor_subscription)',
+    'if type(o) == "table" and bridge.workspace_mode and o.workspace_mode == bridge.wrapped_workspace_mode then o.workspace_mode = bridge.workspace_mode end',
+    'bridge.workspace_subscription = nil; bridge.monitor_subscription = nil; bridge.wrapped_workspace_mode = nil',
+    'bridge.workspace_mode = type(o) == "table" and o.workspace_mode or nil',
+    activeWorkspaceFloatsEval(),
+    'local function apply_hover_focus() hl.timer(function() bridge.restore_follow_mouse = active_workspace_floats() and 0 or hl.get_config("input.follow_mouse"); bridge.restore_mouse_refocus = hl.get_config("input.mouse_refocus"); ' + mouseConfigEval(1, true) + ' end, { type = "oneshot", timeout = 1 }) end',
+    'if bridge.workspace_mode then bridge.wrapped_workspace_mode = function(spec) local result = bridge.workspace_mode(spec); apply_hover_focus(); return result end; o.workspace_mode = bridge.wrapped_workspace_mode end',
+    'bridge.workspace_subscription = hl.on("workspace.active", apply_hover_focus)',
+    'bridge.monitor_subscription = hl.on("monitor.focused", apply_hover_focus)',
+    'rawset(_G, "focus_now_hover_bridge", bridge)',
+    mouseConfigEval(1, true)
+  ].join('; ')
+}
+
+function uninstallHoverBridgeEval(followMouse, refocus) {
+  return [
+    'local bridge = rawget(_G, "focus_now_hover_bridge")',
+    'if bridge then if bridge.workspace_subscription then pcall(function() bridge.workspace_subscription:remove() end) end; if bridge.monitor_subscription then pcall(function() bridge.monitor_subscription:remove() end) end; if type(o) == "table" and bridge.workspace_mode and o.workspace_mode == bridge.wrapped_workspace_mode then o.workspace_mode = bridge.workspace_mode end end',
+    activeWorkspaceFloatsEval(),
+    'local restore_follow = ' + Number(followMouse),
+    'if bridge and tonumber(bridge.restore_follow_mouse) ~= nil then restore_follow = tonumber(bridge.restore_follow_mouse) elseif active_workspace_floats() then restore_follow = 0 end',
+    'local restore_refocus = ' + (refocus ? 'true' : 'false'),
+    'if bridge and bridge.restore_mouse_refocus ~= nil then restore_refocus = bridge.restore_mouse_refocus end',
+    'rawset(_G, "focus_now_hover_bridge", nil)',
+    'hl.config({ input = { follow_mouse = restore_follow, mouse_refocus = restore_refocus } })'
+  ].join('; ')
+}
+
 function isManagedFullscreen(win, address, mode) {
   if (!win || String(win.address || "") !== String(address || "")) return false
   var internal = numberOr(win.fullscreenMode, 0)
@@ -521,6 +562,10 @@ if (typeof module !== "undefined") {
     sameSize: sameSize,
     resizeCommand: resizeCommand,
     resizeEval: resizeEval,
+    mouseConfigEval: mouseConfigEval,
+    activeWorkspaceFloatsEval: activeWorkspaceFloatsEval,
+    installHoverBridgeEval: installHoverBridgeEval,
+    uninstallHoverBridgeEval: uninstallHoverBridgeEval,
     isManagedFullscreen: isManagedFullscreen,
     managedFullscreenCondition: managedFullscreenCondition,
     clearManagedFullscreenEval: clearManagedFullscreenEval,

@@ -55,8 +55,7 @@ omarchy-shell focus-now refresh
 
 - While `hoverFocus` is enabled, the plugin records Hyprland's previous `input.follow_mouse` and `input.mouse_refocus` values, sets them to pointer focus, and restores them when the option or plugin is disabled/unloaded.
 - Near-full mode supports the scrolling layout through `colresize`; on other layouts it uses Hyprland's relative window resize dispatcher iteratively.
-- Floating windows are ignored unless `includeFloating` is set.
-- Omarchy floating workspaces normally force click-to-focus; while `hoverFocus` is enabled, Focus Now reasserts pointer focus after the workspace mode changes it.
+- Floating windows are ignored unless `includeFloating` is set. On Omarchy floating workspaces, that setting also controls whether Focus Now keeps hover focus active; with it off, Omarchy's click-to-focus behavior is preserved.
 - Fullscreen/maximized state created by the user is preserved; Focus Now only clears the exact compositor state it applied itself.
 - The plugin runs unsandboxed inside `omarchy-shell`, like every Omarchy shell plugin.
 

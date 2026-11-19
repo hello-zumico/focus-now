@@ -149,6 +149,19 @@ test("floating windows expand to the configured work-area share", () => {
   assert.match(evalCode, /bring_to_top/)
 })
 
+test("floating managed state restores the original rectangle", () => {
+  const focused = meta(win("float", 950, 700, 80, 40, { floating: true }))
+  const mode = M.managedFloatingMode(focused)
+  const rect = M.parseManagedFloating(mode)
+  assert.deepEqual(rect, { x: 950, y: 700, w: 80, h: 40 })
+  const evalCode = M.restoreFloatingEval("float", rect)
+  assert.match(evalCode, /x = 80, y = 40, relative = false/)
+  assert.match(evalCode, /x = 950, y = 700, relative = false/)
+  assert.doesNotMatch(evalCode, /bring_to_top/)
+  assert.match(M.clearManagedWindowEval("float", mode), /window\.resize/)
+  assert.match(M.clearManagedWindowEval("float", "maximized"), /fullscreen_state/)
+})
+
 test("managed fullscreen ownership is distinguished from user state", () => {
   const userFullscreen = meta(win("a", 0, 40, 500, 760, { fullscreen: 2, fullscreenClient: 2 }))
   const userMaximized = meta(win("a", 0, 40, 500, 760, { fullscreen: 1, fullscreenClient: 1 }))

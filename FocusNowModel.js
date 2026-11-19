@@ -500,6 +500,32 @@ function uninstallHoverBridgeEval(followMouse, refocus) {
   ].join('; ')
 }
 
+function managedFloatingMode(win) {
+  if (!win) return ""
+  return "floating:" + Math.round(win.x) + ":" + Math.round(win.y) + ":" +
+    Math.round(win.w) + ":" + Math.round(win.h)
+}
+
+function parseManagedFloating(mode) {
+  var parts = String(mode || "").split(":")
+  if (parts.length !== 5 || parts[0] !== "floating") return null
+  var rect = {
+    x: numberOr(parts[1], NaN),
+    y: numberOr(parts[2], NaN),
+    w: numberOr(parts[3], NaN),
+    h: numberOr(parts[4], NaN)
+  }
+  return isFinite(rect.x) && isFinite(rect.y) && isFinite(rect.w) && isFinite(rect.h) ? rect : null
+}
+
+function restoreFloatingEval(address, rect) {
+  var window = 'window = "address:' + String(address) + '"'
+  return 'hl.dispatch(hl.dsp.window.resize({ ' + window + ', x = ' + Math.round(rect.w) +
+    ', y = ' + Math.round(rect.h) + ', relative = false })); ' +
+    'hl.dispatch(hl.dsp.window.move({ ' + window + ', x = ' + Math.round(rect.x) +
+    ', y = ' + Math.round(rect.y) + ', relative = false }))'
+}
+
 function isManagedFullscreen(win, address, mode) {
   if (!win || String(win.address || "") !== String(address || "")) return false
   var internal = numberOr(win.fullscreenMode, 0)
@@ -537,6 +563,11 @@ function setManagedFullscreenEval(address) {
     'if target then hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 2, client = 1, window = target })) end'
 }
 
+function clearManagedWindowEval(address, mode) {
+  var floating = parseManagedFloating(mode)
+  return floating ? restoreFloatingEval(address, floating) : clearManagedFullscreenEval(address, mode)
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     MULTIPLIERS: MULTIPLIERS,
@@ -564,6 +595,9 @@ if (typeof module !== "undefined") {
     targetReached: targetReached,
     floatingTarget: floatingTarget,
     floatingPlacement: floatingPlacement,
+    managedFloatingMode: managedFloatingMode,
+    parseManagedFloating: parseManagedFloating,
+    restoreFloatingEval: restoreFloatingEval,
     resizeCommand: resizeCommand,
     resizeEval: resizeEval,
     floatingResizeEval: floatingResizeEval,
@@ -575,6 +609,7 @@ if (typeof module !== "undefined") {
     isManagedFullscreen: isManagedFullscreen,
     managedFullscreenCondition: managedFullscreenCondition,
     clearManagedFullscreenEval: clearManagedFullscreenEval,
+    clearManagedWindowEval: clearManagedWindowEval,
     clearOtherFullscreenEval: clearOtherFullscreenEval,
     setManagedFullscreenEval: setManagedFullscreenEval
   }

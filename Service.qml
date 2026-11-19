@@ -156,7 +156,7 @@ Item {
       return
     }
     cleanupProc.command = [root.binTimeout, "-k", "2", "3", root.binHyprctl, "eval",
-      Model.clearManagedFullscreenEval(root.managedAddress, root.managedMode)]
+      Model.clearManagedWindowEval(root.managedAddress, root.managedMode)]
     root.managedAddress = ""
     root.managedMode = ""
     if (detached) cleanupProc.startDetached()

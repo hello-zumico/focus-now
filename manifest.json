@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "eb.focus-now",
   "name": "Focus Now",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "author": "eb",
   "license": "MIT",
   "description": "Focus the hovered window, center it, fullscreen it, or grow it to a configurable share while neighbors make room.",

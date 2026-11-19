@@ -111,6 +111,21 @@ function applyFloating() {
   return true
 }
 
+function restoreManagedFloating(address, rect) {
+  if (!address || !rect) return false
+  const prior = clientsByAddress()[address]
+  if (!prior || !prior.floating) return false
+  evalLua(M.restoreFloatingEval(address, rect))
+  trace("floating restored", { address, rect })
+  return true
+}
+
+function restorePriorManagedFloating(restoreCurrent) {
+  const rect = M.parseManagedFloating(managedMode)
+  if (!rect || (managedAddress === focusedAddress && !restoreCurrent)) return false
+  return restoreManagedFloating(managedAddress, rect)
+}
+
 function applyScrolling() {
   const clients = clientsByAddress()
   const focused = clients[focusedAddress]
@@ -201,6 +216,7 @@ try {
   const active = activeAddress()
   trace("start", { focusedAddress, active, expandMode, managedAddress, managedMode })
   if (active !== focusedAddress) process.exit(0)
+  restorePriorManagedFloating(expandMode !== "near" || !includeFloating)
   const clients = clientsByAddress()
   if (!prepareFocused(clients)) {
     finish("")
@@ -214,12 +230,16 @@ try {
   const currentClients = clientsByAddress()
   const focusedNow = currentClients[focusedAddress]
   if (!M.isActionable(focusedNow, includeFloating)) {
+    if (managedAddress === focusedAddress) {
+      restoreManagedFloating(managedAddress, M.parseManagedFloating(managedMode))
+    }
     finish("")
     process.exit(0)
   }
   if (focusedNow.floating) {
-    applyFloating()
-    finish("")
+    const existingRect = managedAddress === focusedAddress ? M.parseManagedFloating(managedMode) : null
+    const applied = applyFloating()
+    finish(applied ? (existingRect ? managedMode : M.managedFloatingMode(focusedNow)) : "")
     process.exit(0)
   }
   const layout = activeLayout()

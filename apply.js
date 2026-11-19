@@ -60,6 +60,10 @@ function prepareFocused(clients) {
   const focused = clients[focusedAddress]
   if (!focused || !focused.fullscreen) return !!focused
   if (M.isManagedFullscreen(focused, managedAddress, managedMode)) {
+    if (M.managedFullscreenApplies(focused, managedAddress, managedMode, expandMode, isOnlyWorkspaceWindow(clients))) {
+      trace("keeping managed fullscreen state", focused)
+      return true
+    }
     trace("clearing managed fullscreen state", focused)
     evalLua(M.clearManagedFullscreenEval(focusedAddress, managedMode))
     return true
@@ -82,7 +86,7 @@ function finish(managed) {
 }
 
 function maximizeFocused() {
-  dispatch('hl.dsp.window.fullscreen({ mode = "maximized", window = "address:' + focusedAddress + '" })')
+  evalLua(M.setManagedMaximizedEval(focusedAddress))
 }
 
 function applyFullscreen() {

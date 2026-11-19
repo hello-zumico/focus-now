@@ -197,6 +197,17 @@ test("managed fullscreen cleanup only matches the owned state", () => {
   assert.match(M.clearManagedFullscreenEval("a", "unknown"), /target and false then/)
 })
 
+test("managed fullscreen states are reused only for the requested mode", () => {
+  const maximized = meta(win("a", 0, 40, 500, 760, { fullscreen: 1, fullscreenClient: 1 }))
+  const fullscreen = meta(win("a", 0, 40, 500, 760, { fullscreen: 2, fullscreenClient: 1 }))
+  assert.equal(M.managedFullscreenApplies(maximized, "a", "maximized", "near", true), true)
+  assert.equal(M.managedFullscreenApplies(maximized, "a", "maximized", "near", false), false)
+  assert.equal(M.managedFullscreenApplies(maximized, "a", "maximized", "fullscreen", true), false)
+  assert.equal(M.managedFullscreenApplies(fullscreen, "a", "fullscreen", "fullscreen", false), true)
+  assert.equal(M.managedFullscreenApplies(fullscreen, "a", "fullscreen", "near", false), false)
+  assert.match(M.setManagedMaximizedEval("a"), /internal = 1, client = 1/)
+})
+
 test("a focused window in a shared edge column resizes its own boundary", () => {
   const scaled = M.parseMonitors(JSON.stringify([
     { id: 0, x: 0, y: 0, width: 1920, height: 1080, scale: 1.25, reserved: [0, 0, 0, 26], focused: true }

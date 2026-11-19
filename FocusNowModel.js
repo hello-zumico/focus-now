@@ -549,6 +549,13 @@ function isManagedFullscreen(win, address, mode) {
   return false
 }
 
+function managedFullscreenApplies(win, address, mode, expandMode, onlyWorkspaceWindow) {
+  if (!isManagedFullscreen(win, address, mode)) return false
+  if (expandMode === "fullscreen") return mode === "fullscreen"
+  if (expandMode === "near") return mode === "maximized" && !!onlyWorkspaceWindow
+  return false
+}
+
 function managedFullscreenCondition(mode) {
   if (mode === "maximized") return 'target.fullscreen == 1 and target.fullscreen_client == 1'
   if (mode === "fullscreen") return 'target.fullscreen == 2 and target.fullscreen_client == 1'
@@ -569,6 +576,12 @@ function clearOtherFullscreenEval(address) {
     'if other.address ~= target.address and (other.fullscreen ~= 0 or other.fullscreen_client ~= 0) then ' +
     'hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 0, client = 0, window = other })) end ' +
     'end end'
+}
+
+function setManagedMaximizedEval(address) {
+  return 'local target = nil; for _, w in ipairs(hl.get_windows()) do ' +
+    'if w.address == "' + String(address) + '" then target = w break end end; ' +
+    'if target then hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 1, client = 1, window = target })) end'
 }
 
 function setManagedFullscreenEval(address) {
@@ -623,7 +636,9 @@ if (typeof module !== "undefined") {
     installHoverBridgeEval: installHoverBridgeEval,
     uninstallHoverBridgeEval: uninstallHoverBridgeEval,
     isManagedFullscreen: isManagedFullscreen,
+    managedFullscreenApplies: managedFullscreenApplies,
     managedFullscreenCondition: managedFullscreenCondition,
+    setManagedMaximizedEval: setManagedMaximizedEval,
     clearManagedFullscreenEval: clearManagedFullscreenEval,
     clearManagedWindowEval: clearManagedWindowEval,
     clearOtherFullscreenEval: clearOtherFullscreenEval,

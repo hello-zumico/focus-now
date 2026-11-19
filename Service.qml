@@ -34,6 +34,7 @@ Item {
   property bool hoverBridgeInstalled: false
   property string managedAddress: ""
   property string managedMode: ""
+  property string hoverMonitorAddress: ""
   property int savedFollowMouse: -1
   property bool savedMouseRefocus: true
 
@@ -142,6 +143,26 @@ Item {
     uninstallHoverBridge()
   }
 
+  function stopFloatingHoverMonitor() {
+    root.hoverMonitorAddress = ""
+    if (floatingHoverMonitor.running) floatingHoverMonitor.running = false
+  }
+
+  function startFloatingHoverMonitor() {
+    root.stopFloatingHoverMonitor()
+    if (!root.binNode || root.managedMode.indexOf("floating:") !== 0) return
+    root.hoverMonitorAddress = root.managedAddress
+    floatingHoverMonitor.command = [
+      root.binNode,
+      root.pluginDir + "/hover-monitor.js",
+      root.managedAddress,
+      root.binHyprctl,
+      root.managedMode
+    ]
+    floatingHoverMonitor.running = false
+    floatingHoverMonitor.running = true
+  }
+
   function hyprAddress(address) {
     var value = String(address || "")
     if (value.indexOf("0x") === 0) return value
@@ -150,6 +171,7 @@ Item {
   }
 
   function clearManagedWindow(detached) {
+    root.stopFloatingHoverMonitor()
     if (!root.managedAddress || !root.managedMode) {
       root.managedAddress = ""
       root.managedMode = ""
@@ -189,6 +211,7 @@ Item {
     root.pendingAddress = ""
 
     if ((config.expandMode === "fullscreen" || config.expandMode === "near") && root.binNode) {
+      root.stopFloatingHoverMonitor()
       var priorManagedAddress = root.managedAddress
       var priorManagedMode = root.managedMode
       root.managedAddress = ""
@@ -236,6 +259,7 @@ Item {
       applying: applying,
       hoverHeld: hoverHeld,
       hoverBridge: hoverBridgeInstalled,
+      hoverMonitor: floatingHoverMonitor.running,
       node: binNode
     })
   }
@@ -288,6 +312,7 @@ Item {
         if (result && result.address) {
           root.managedAddress = result.managed ? String(result.address) : ""
           root.managedMode = String(result.managed || "")
+          root.startFloatingHoverMonitor()
         }
       }
     }
@@ -295,6 +320,25 @@ Item {
       root.applying = false
       if (root.pendingAddress && root.pendingAddress !== root.lastHandledAddress) debounce.restart()
     }
+  }
+
+  Process {
+    id: floatingHoverMonitor
+    stdout: SplitParser {
+      onRead: function(line) {
+        var result = Model.parseJson(line, null)
+        if (!result || result.address !== root.hoverMonitorAddress) return
+        if (result.reason === "left") {
+          if (root.managedAddress === result.address) {
+            root.managedAddress = ""
+            root.managedMode = ""
+          }
+        } else if (result.reason === "entered") {
+          root.requestRefresh(result.address)
+        }
+      }
+    }
+    onExited: root.hoverMonitorAddress = ""
   }
 
   Process {

@@ -1,5 +1,9 @@
 const test = require("node:test")
 const assert = require("node:assert/strict")
+const { spawn } = require("node:child_process")
+const fs = require("node:fs")
+const os = require("node:os")
+const path = require("node:path")
 const M = require("../FocusNowModel.js")
 
 function win(address, x, y, w, h, extra = {}) {
@@ -255,4 +259,64 @@ test("hover bridge handles floating-mode input changes without polling", () => {
   assert.match(uninstall, /elseif active_workspace_floats\(\) then restore_follow = 0/)
   assert.match(uninstall, /restore_refocus = false/)
   assert.match(uninstall, /restore_mouse_refocus ~= nil/)
+})
+
+test("floating hover monitor restores on leave and reports re-entry", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "focus-now-hover-"))
+  const activePath = path.join(dir, "active.json")
+  const cursorPath = path.join(dir, "cursor.json")
+  const evalsPath = path.join(dir, "evals.txt")
+  const hyprctlPath = path.join(dir, "hyprctl")
+  const focused = win("target", 100, 100, 200, 100, { floating: true })
+  fs.writeFileSync(activePath, JSON.stringify(focused))
+  fs.writeFileSync(cursorPath, JSON.stringify({ x: 0, y: 0 }))
+  fs.writeFileSync(hyprctlPath, `#!/bin/sh
+if [ "$1" = "-j" ] && [ "$2" = "activewindow" ]; then
+  cat "$3"
+elif [ "$1" = "-j" ] && [ "$2" = "cursorpos" ]; then
+  cat "$4"
+elif [ "$1" = "eval" ]; then
+  printf '%s\\n' "$2" >> "$5"
+fi
+`.replace(/\$3/g, activePath).replace(/\$4/g, cursorPath).replace(/\$5/g, evalsPath))
+  fs.chmodSync(hyprctlPath, 0o755)
+
+  const child = spawn(process.execPath, [
+    path.join(__dirname, "..", "hover-monitor.js"),
+    "target",
+    hyprctlPath,
+    "floating:100:100:200:100"
+  ], { stdio: ["ignore", "pipe", "pipe"] })
+  let output = ""
+  child.stdout.on("data", chunk => { output += chunk })
+
+  const waitFor = needle => new Promise((resolve, reject) => {
+    const started = Date.now()
+    const timer = setInterval(() => {
+      if (output.includes(needle)) {
+        clearInterval(timer)
+        resolve()
+      } else if (child.exitCode !== null || Date.now() - started > 3000) {
+        clearInterval(timer)
+        reject(new Error(`monitor did not emit ${needle}; output=${output}`))
+      }
+    }, 10)
+  })
+
+  try {
+    await waitFor('"left"')
+    const restoreEval = fs.readFileSync(evalsPath, "utf8")
+    assert.match(restoreEval, /window\.resize/)
+    assert.match(restoreEval, /window\.move/)
+
+    fs.writeFileSync(cursorPath, JSON.stringify({ x: 150, y: 120 }))
+    await waitFor('"entered"')
+
+    fs.writeFileSync(activePath, JSON.stringify(win("other", 300, 100, 200, 100, { floating: true })))
+    await waitFor('"inactive"')
+    if (child.exitCode === null) await new Promise(resolve => child.once("exit", resolve))
+  } finally {
+    if (child.exitCode === null) child.kill()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

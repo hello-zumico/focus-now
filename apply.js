@@ -109,15 +109,31 @@ function floatingTopInset(focused) {
   }
 }
 
+function sleep(milliseconds) {
+  execFileSync("/usr/bin/sleep", [String(milliseconds / 1000)], { stdio: "ignore" })
+}
+
+function hoveredFloatingWindow() {
+  for (let i = 0; i < 13; i++) {
+    if (activeAddress() !== focusedAddress) return null
+    const focused = clientsByAddress()[focusedAddress]
+    const cursor = cursorPos()
+    const insideWindow = M.pointInsideWindow(focused, cursor, 0, 2)
+    const insideContent = M.pointInsideWindow(focused, cursor, floatingTopInset(focused), 2)
+    if ((i === 0 && insideWindow) || insideContent) return { focused, cursor }
+    if (i < 12) sleep(50)
+  }
+  return null
+}
+
 function applyFloating() {
-  const clients = clientsByAddress()
-  const focused = clients[focusedAddress]
-  const cursor = cursorPos()
-  const topInset = floatingTopInset(focused)
-  if (!M.pointInsideWindow(focused, cursor, topInset, 2)) {
-    trace("floating skipped because pointer is outside the window", { cursor, focused, topInset })
+  const hovered = hoveredFloatingWindow()
+  if (!hovered) {
+    trace("floating skipped because pointer stayed outside the window")
     return false
   }
+  const focused = hovered.focused
+  const cursor = hovered.cursor
   const monitors = M.parseMonitors(hyprJson("monitors"))
   const target = M.floatingTarget(focused, monitors, cfg)
   const placement = M.floatingPlacement(focused, target, cursor)

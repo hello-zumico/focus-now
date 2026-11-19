@@ -86,7 +86,8 @@ function windowMeta(c) {
     fullscreen: numberOr(c.fullscreen, 0) > 0 || numberOr(c.fullscreenClient, 0) > 0,
     pinned: !!c.pinned,
     mapped: c.mapped !== false,
-    monitor: numberOr(c.monitor, -1)
+    monitor: numberOr(c.monitor, -1),
+    tags: Array.isArray(c.tags) ? c.tags.map(function(tag) { return String(tag) }) : []
   }
 }
 
@@ -139,6 +140,19 @@ function parseMonitors(raw) {
 
 function monitorForWindow(win, monitors) {
   return win && monitors ? monitors[numberOr(win.monitor, -1)] || null : null
+}
+
+function hasTag(win, tag) {
+  tag = String(tag || "")
+  return !!(win && tag && Array.isArray(win.tags) && win.tags.indexOf(tag) >= 0)
+}
+
+function pointInsideWindow(win, cursor, topInset, margin) {
+  topInset = Math.max(0, numberOr(topInset, 0))
+  margin = Math.max(0, numberOr(margin, 0))
+  return !!(win && cursor && isFinite(cursor.x) && isFinite(cursor.y) &&
+    cursor.x >= win.x + margin && cursor.x < win.x + win.w - margin &&
+    cursor.y >= win.y + topInset + margin && cursor.y < win.y + win.h - margin)
 }
 
 function isActionable(win, includeFloating) {
@@ -582,6 +596,8 @@ if (typeof module !== "undefined") {
     parseActiveWindow: parseActiveWindow,
     parseMonitors: parseMonitors,
     monitorForWindow: monitorForWindow,
+    hasTag: hasTag,
+    pointInsideWindow: pointInsideWindow,
     isActionable: isActionable,
     clientsList: clientsList,
     workspaceWindows: workspaceWindows,

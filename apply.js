@@ -99,12 +99,28 @@ function cursorPos() {
   }
 }
 
+function floatingTopInset(focused) {
+  if (!M.hasTag(focused, "omarchy-floating-workspace")) return 0
+  try {
+    const option = JSON.parse(execFileSync(hyprctl, ["getoption", "plugin:hyprbars:bar_height", "-j"], { encoding: "utf8" }))
+    return Math.max(0, Number(option.int) || 0)
+  } catch (e) {
+    return 0
+  }
+}
+
 function applyFloating() {
   const clients = clientsByAddress()
   const focused = clients[focusedAddress]
+  const cursor = cursorPos()
+  const topInset = floatingTopInset(focused)
+  if (!M.pointInsideWindow(focused, cursor, topInset, 2)) {
+    trace("floating skipped because pointer is outside the window", { cursor, focused, topInset })
+    return false
+  }
   const monitors = M.parseMonitors(hyprJson("monitors"))
   const target = M.floatingTarget(focused, monitors, cfg)
-  const placement = M.floatingPlacement(focused, target, cursorPos())
+  const placement = M.floatingPlacement(focused, target, cursor)
   if (!placement) return false
   evalLua(M.floatingResizeEval(focusedAddress, placement))
   trace("floating applied", placement)
@@ -239,7 +255,7 @@ try {
   if (focusedNow.floating) {
     const existingRect = managedAddress === focusedAddress ? M.parseManagedFloating(managedMode) : null
     const applied = applyFloating()
-    finish(applied ? (existingRect ? managedMode : M.managedFloatingMode(focusedNow)) : "")
+    finish(existingRect ? managedMode : (applied ? M.managedFloatingMode(focusedNow) : ""))
     process.exit(0)
   }
   const layout = activeLayout()

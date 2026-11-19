@@ -149,6 +149,18 @@ test("floating windows expand to the configured work-area share", () => {
   assert.match(evalCode, /bring_to_top/)
 })
 
+test("floating expansion requires the pointer inside the usable window", () => {
+  const focused = meta(win("float", 100, 100, 200, 100, {
+    floating: true,
+    tags: ["omarchy-floating-workspace"]
+  }))
+  assert.equal(M.hasTag(focused, "omarchy-floating-workspace"), true)
+  assert.equal(M.pointInsideWindow(focused, { x: 150, y: 132 }, 30, 2), true)
+  assert.equal(M.pointInsideWindow(focused, { x: 150, y: 131 }, 30, 2), false)
+  assert.equal(M.pointInsideWindow(focused, { x: 101, y: 150 }, 30, 2), false)
+  assert.equal(M.pointInsideWindow(focused, null, 30, 2), false)
+})
+
 test("floating managed state restores the original rectangle", () => {
   const focused = meta(win("float", 950, 700, 80, 40, { floating: true }))
   const mode = M.managedFloatingMode(focused)

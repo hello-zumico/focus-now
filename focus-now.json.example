@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "hoverFocus": true,
+  "expandMode": "near",
+  "widthMultiplier": 0.85,
+  "heightMultiplier": 0.85,
+  "includeFloating": false
+}

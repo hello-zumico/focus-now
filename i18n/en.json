@@ -1,0 +1,20 @@
+{
+  "title": "Focus Now",
+  "status.off": "Off",
+  "status.hover": "Hover focus + center",
+  "status.fullscreen": "Fullscreen on focus",
+  "status.near": "Near full · %1 × %2",
+  "section.behavior": "Behavior",
+  "behavior.hover": "Hover focus + center",
+  "behavior.hover.hint": "Focus follows the pointer and scrolling workspaces center the focused column.",
+  "behavior.fullscreen": "Fullscreen",
+  "behavior.fullscreen.hint": "Focused windows claim real fullscreen; other fullscreen windows on the workspace are restored.",
+  "behavior.near": "Near full",
+  "behavior.near.hint": "Focused windows take the selected share; neighboring windows share the remainder.",
+  "section.multipliers": "Focused size",
+  "row.width": "Width multiplier",
+  "row.height": "Height multiplier",
+  "hint.noNeighbors": "With no neighbor on an axis, the window claims the full width or height.",
+  "bar.tooltipOn": "Focus Now on",
+  "bar.tooltipOff": "Focus Now off"
+}

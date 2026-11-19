@@ -397,6 +397,41 @@ function targetReached(win, target, tolerance) {
     (!(target.h > 0) || Math.abs(win.h - target.h) <= tolerance)
 }
 
+function floatingTarget(focused, monitors, cfg) {
+  var mon = monitorForWindow(focused, monitors)
+  var wa = mon && mon.wa
+  if (!focused || !wa || wa.w <= 0 || wa.h <= 0) return null
+  return {
+    x: wa.x,
+    y: wa.y,
+    w: Math.max(80, Math.round(wa.w * cfg.widthMultiplier)),
+    h: Math.max(80, Math.round(wa.h * cfg.heightMultiplier)),
+    wa: wa
+  }
+}
+
+function floatingPlacement(focused, target, cursor) {
+  if (!focused || !target) return null
+  var minX = target.wa.x
+  var minY = target.wa.y
+  var maxX = target.wa.x + target.wa.w - target.w
+  var maxY = target.wa.y + target.wa.h - target.h
+  var x = clamp(focused.x, minX, maxX)
+  var y = clamp(focused.y, minY, maxY)
+  var pointerInside = cursor &&
+    cursor.x >= focused.x && cursor.x < focused.x + focused.w &&
+    cursor.y >= focused.y && cursor.y < focused.y + focused.h
+  if (pointerInside) {
+    if (cursor.x < x || cursor.x >= x + target.w) {
+      x = clamp(cursor.x - target.w / 2, minX, maxX)
+    }
+    if (cursor.y < y || cursor.y >= y + target.h) {
+      y = clamp(cursor.y - target.h / 2, minY, maxY)
+    }
+  }
+  return { x: Math.round(x), y: Math.round(y), w: target.w, h: target.h }
+}
+
 function resizeCommand(address, dx, dy, relative) {
   return 'hl.dsp.window.resize({ window = "address:' + String(address) + '", x = ' +
     Math.round(dx) + ', y = ' + Math.round(dy) + ', relative = ' +
@@ -409,6 +444,15 @@ function resizeEval(ops) {
     out.push('hl.dispatch(' + resizeCommand(ops[i].address, ops[i].dx, ops[i].dy, ops[i].relative) + ')')
   }
   return out.join('; ')
+}
+
+function floatingResizeEval(address, box) {
+  var window = 'window = "address:' + String(address) + '"'
+  return 'hl.dispatch(hl.dsp.window.resize({ ' + window + ', x = ' + Math.round(box.w) +
+    ', y = ' + Math.round(box.h) + ', relative = false })); ' +
+    'hl.dispatch(hl.dsp.window.move({ ' + window + ', x = ' + Math.round(box.x) +
+    ', y = ' + Math.round(box.y) + ', relative = false })); ' +
+    'hl.dispatch(hl.dsp.window.bring_to_top({ ' + window + ' }))'
 }
 
 function moveToRootEval() {
@@ -518,8 +562,11 @@ if (typeof module !== "undefined") {
     layoutOps: layoutOps,
     sameSize: sameSize,
     targetReached: targetReached,
+    floatingTarget: floatingTarget,
+    floatingPlacement: floatingPlacement,
     resizeCommand: resizeCommand,
     resizeEval: resizeEval,
+    floatingResizeEval: floatingResizeEval,
     moveToRootEval: moveToRootEval,
     mouseConfigEval: mouseConfigEval,
     activeWorkspaceFloatsEval: activeWorkspaceFloatsEval,

@@ -137,6 +137,18 @@ test("floating windows are ignored unless requested", () => {
   assert.deepEqual(M.workspaceWindows(clients, clients.b, false).map(w => w.address), ["b"])
 })
 
+test("floating windows expand to the configured work-area share", () => {
+  const focused = meta(win("float", 950, 700, 80, 40, { floating: true }))
+  const target = M.floatingTarget(focused, monitors, cfg)
+  assert.deepEqual({ w: target.w, h: target.h }, { w: 800, h: 608 })
+  const placement = M.floatingPlacement(focused, target, { x: 960, y: 710 })
+  assert.deepEqual(placement, { x: 200, y: 192, w: 800, h: 608 })
+  const evalCode = M.floatingResizeEval("float", placement)
+  assert.match(evalCode, /x = 800, y = 608, relative = false/)
+  assert.match(evalCode, /x = 200, y = 192, relative = false/)
+  assert.match(evalCode, /bring_to_top/)
+})
+
 test("managed fullscreen ownership is distinguished from user state", () => {
   const userFullscreen = meta(win("a", 0, 40, 500, 760, { fullscreen: 2, fullscreenClient: 2 }))
   const userMaximized = meta(win("a", 0, 40, 500, 760, { fullscreen: 1, fullscreenClient: 1 }))

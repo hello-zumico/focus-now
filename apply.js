@@ -90,6 +90,27 @@ function applyFullscreen() {
   evalLua(M.setManagedFullscreenEval(focusedAddress))
 }
 
+function cursorPos() {
+  try {
+    const pos = JSON.parse(hyprJson("cursorpos"))
+    return { x: Number(pos.x), y: Number(pos.y) }
+  } catch (e) {
+    return null
+  }
+}
+
+function applyFloating() {
+  const clients = clientsByAddress()
+  const focused = clients[focusedAddress]
+  const monitors = M.parseMonitors(hyprJson("monitors"))
+  const target = M.floatingTarget(focused, monitors, cfg)
+  const placement = M.floatingPlacement(focused, target, cursorPos())
+  if (!placement) return false
+  evalLua(M.floatingResizeEval(focusedAddress, placement))
+  trace("floating applied", placement)
+  return true
+}
+
 function applyScrolling() {
   const clients = clientsByAddress()
   const focused = clients[focusedAddress]
@@ -188,6 +209,17 @@ try {
   if (expandMode === "fullscreen") {
     applyFullscreen()
     finish("fullscreen")
+    process.exit(0)
+  }
+  const currentClients = clientsByAddress()
+  const focusedNow = currentClients[focusedAddress]
+  if (!M.isActionable(focusedNow, includeFloating)) {
+    finish("")
+    process.exit(0)
+  }
+  if (focusedNow.floating) {
+    applyFloating()
+    finish("")
     process.exit(0)
   }
   const layout = activeLayout()

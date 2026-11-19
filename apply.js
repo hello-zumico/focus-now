@@ -114,6 +114,22 @@ function layoutKey(clients) {
     .join("|")
 }
 
+let triedMoveToRoot = false
+
+function promoteToRoot() {
+  if (triedMoveToRoot || activeAddress() !== focusedAddress) return false
+  const clients = clientsByAddress()
+  const focused = clients[focusedAddress]
+  if (!focused) return false
+  const monitors = M.parseMonitors(hyprJson("monitors"))
+  const targets = M.layoutTargets(focused, clients, monitors, cfg)
+  if (M.targetReached(focused, targets[focusedAddress])) return false
+  triedMoveToRoot = true
+  trace("moving to root", { focused, target: targets[focusedAddress] })
+  evalLua(M.moveToRootEval())
+  return true
+}
+
 function stepDwindle() {
   const clients = clientsByAddress()
   const monitors = M.parseMonitors(hyprJson("monitors"))
@@ -133,6 +149,10 @@ function stepDwindle() {
     trace("batch dispatch failed", { ops: primary, error: String(e && e.stderr || e) })
   }
   let afterClients = clientsByAddress()
+  if (M.targetReached(afterClients[focusedAddress], plan.targets[focusedAddress])) {
+    trace("target reached", afterClients[focusedAddress])
+    return false
+  }
   for (const op of primary) {
     const before = clients[op.address]
     const after = afterClients[op.address]
@@ -143,7 +163,7 @@ function stepDwindle() {
     if ((op.candidate || 0) === 0) continue
     const before = clients[op.address]
     try {
-      dispatch(M.resizeCommand(op.address, op.dx, op.dy))
+      dispatch(M.resizeCommand(op.address, op.dx, op.dy, op.relative))
     } catch (e) {
       trace("dispatch failed", { op, error: String(e && e.stderr || e) })
       continue
@@ -188,11 +208,12 @@ try {
   for (let i = 0; i < 8; i++) {
     const key = layoutKey(clientsByAddress())
     if (seenLayouts.has(key)) {
+      if (promoteToRoot()) continue
       trace("stopping on repeated layout", key)
       break
     }
     seenLayouts.add(key)
-    if (!stepDwindle()) break
+    if (!stepDwindle() && !promoteToRoot()) break
   }
   finish("")
 } catch (e) {

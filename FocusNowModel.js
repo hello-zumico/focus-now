@@ -318,30 +318,6 @@ function layoutTargets(focused, byAddress, monitors, cfg) {
   )
 }
 
-function edgeSigns(win, mon) {
-  var tolerance = 20
-  var wa = mon && mon.wa && mon.wa.w > 0 && mon.wa.h > 0 ? mon.wa : null
-  var left = false, right = false, top = false, bottom = false
-  if (wa) {
-    left = win.x <= wa.x + tolerance
-    right = win.x + win.w >= wa.x + wa.w - tolerance
-    top = win.y <= wa.y + tolerance
-    bottom = win.y + win.h >= wa.y + wa.h - tolerance
-  }
-  return {
-    sx: left && right ? 0 : (right && !left ? -1 : 1),
-    sy: top && bottom ? 0 : (bottom && !top ? -1 : 1)
-  }
-}
-
-function deltaToTarget(win, mon, target) {
-  var signs = edgeSigns(win, mon)
-  return {
-    x: signs.sx === 0 ? 0 : ((target.w || win.w) - win.w) * signs.sx,
-    y: signs.sy === 0 ? 0 : ((target.h || win.h) - win.h) * signs.sy
-  }
-}
-
 function representativeFirst(windows, axis) {
   return windows.slice().sort(function(a, b) {
     var spanA = axis === "x" ? a.h : a.w
@@ -350,13 +326,16 @@ function representativeFirst(windows, axis) {
   })
 }
 
+function resizeDirection(index, last) {
+  if (index === 0) return 1
+  if (index === last) return -1
+  return index % 2 === 0 ? 1 : -1
+}
+
 function axisResizeOps(focused, windows, axis, targets) {
   var pool = axisPool(focused, windows, axis)
   var strips = clusterStrips(pool, axis)
   var focusedIndex = -1
-  var focusedCenter = axis === "x"
-    ? focused.x + focused.w / 2
-    : focused.y + focused.h / 2
   for (var i = 0; i < strips.length; i++) {
     for (var j = 0; j < strips[i].windows.length; j++) {
       if (strips[i].windows[j].address === focused.address) focusedIndex = i
@@ -364,24 +343,9 @@ function axisResizeOps(focused, windows, axis, targets) {
   }
   if (focusedIndex < 0) return []
   var ops = []
-  var focusedStrip = strips[focusedIndex]
   var focusedTarget = targets[focused.address]
-  var focusedDirection = focusedIndex === 0 ? 1 : (focusedIndex === strips.length - 1 ? -1 : 0)
-  var axisSiblings = []
-  var focusedA1 = axis === "x" ? focused.x : focused.y
-  var focusedA2 = focusedA1 + (axis === "x" ? focused.w : focused.h)
-  for (i = 0; i < windows.length; i++) {
-    var sibling = windows[i]
-    var siblingA1 = axis === "x" ? sibling.x : sibling.y
-    var siblingA2 = siblingA1 + (axis === "x" ? sibling.w : sibling.h)
-    var overlap = overlapAmount(focusedA1, focusedA2, siblingA1, siblingA2)
-    var focusedSpan = focusedA2 - focusedA1
-    var siblingSpan = siblingA2 - siblingA1
-    var sharedRange = overlap / Math.max(1, Math.min(focusedSpan, siblingSpan))
-    var sameSpan = Math.min(focusedSpan, siblingSpan) / Math.max(1, Math.max(focusedSpan, siblingSpan))
-    if (sharedRange > 0.75 && sameSpan > 0.75) axisSiblings.push(sibling)
-  }
-  if (axisSiblings.length > 1 && strips.length > 1 && focusedDirection !== 0 && focusedTarget) {
+  var focusedDirection = resizeDirection(focusedIndex, strips.length - 1)
+  if (strips.length > 1 && focusedTarget) {
     var current = axis === "x" ? focused.w : focused.h
     var wanted = axis === "x" ? focusedTarget.w : focusedTarget.h
     var delta = ((wanted || current) - current) * focusedDirection
@@ -395,8 +359,7 @@ function axisResizeOps(focused, windows, axis, targets) {
   for (i = 0; i < strips.length; i++) {
     if (i === focusedIndex) continue
     var strip = strips[i]
-    var stripCenter = (strip.a1 + strip.a2) / 2
-    var direction = stripCenter < focusedCenter ? 1 : -1
+    var direction = resizeDirection(i, strips.length - 1)
     var candidates = representativeFirst(strip.windows, axis)
     for (j = 0; j < candidates.length; j++) {
       var win = candidates[j]
@@ -422,35 +385,34 @@ function layoutOps(focused, byAddress, monitors, cfg) {
   return { targets: targets, ops: ops }
 }
 
-function pickOp(ops) {
-  var best = null
-  var bestAmount = 0
-  for (var i = 0; i < ops.length; i++) {
-    var amount = Math.abs(ops[i].dx) + Math.abs(ops[i].dy)
-    if (amount > bestAmount) {
-      best = ops[i]
-      bestAmount = amount
-    }
-  }
-  return best
-}
-
 function sameSize(a, b, tolerance) {
   tolerance = tolerance === undefined ? 4 : tolerance
   return !!a && !!b && Math.abs(a.w - b.w) <= tolerance && Math.abs(a.h - b.h) <= tolerance
 }
 
-function resizeCommand(address, dx, dy) {
+function targetReached(win, target, tolerance) {
+  tolerance = tolerance === undefined ? 32 : tolerance
+  return !!win && !!target &&
+    (!(target.w > 0) || Math.abs(win.w - target.w) <= tolerance) &&
+    (!(target.h > 0) || Math.abs(win.h - target.h) <= tolerance)
+}
+
+function resizeCommand(address, dx, dy, relative) {
   return 'hl.dsp.window.resize({ window = "address:' + String(address) + '", x = ' +
-    Math.round(dx) + ', y = ' + Math.round(dy) + ', relative = true })'
+    Math.round(dx) + ', y = ' + Math.round(dy) + ', relative = ' +
+    (relative === false ? 'false' : 'true') + ' })'
 }
 
 function resizeEval(ops) {
   var out = []
   for (var i = 0; i < ops.length; i++) {
-    out.push('hl.dispatch(' + resizeCommand(ops[i].address, ops[i].dx, ops[i].dy) + ')')
+    out.push('hl.dispatch(' + resizeCommand(ops[i].address, ops[i].dx, ops[i].dy, ops[i].relative) + ')')
   }
   return out.join('; ')
+}
+
+function moveToRootEval() {
+  return 'hl.dispatch(hl.dsp.layout("movetoroot"))'
 }
 
 function mouseConfigEval(followMouse, refocus) {
@@ -553,15 +515,12 @@ if (typeof module !== "undefined") {
     axisPool: axisPool,
     axisTargets: axisTargets,
     layoutTargets: layoutTargets,
-    edgeSigns: edgeSigns,
-    deltaToTarget: deltaToTarget,
-    representativeFirst: representativeFirst,
-    axisResizeOps: axisResizeOps,
     layoutOps: layoutOps,
-    pickOp: pickOp,
     sameSize: sameSize,
+    targetReached: targetReached,
     resizeCommand: resizeCommand,
     resizeEval: resizeEval,
+    moveToRootEval: moveToRootEval,
     mouseConfigEval: mouseConfigEval,
     activeWorkspaceFloatsEval: activeWorkspaceFloatsEval,
     installHoverBridgeEval: installHoverBridgeEval,

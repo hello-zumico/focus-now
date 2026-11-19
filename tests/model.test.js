@@ -99,12 +99,12 @@ test("no neighbors claim the full work-area dimensions", () => {
   assert.equal(targets.a.h, 760)
 })
 
-test("layout ops resize neighboring strips so the focused window takes the remainder", () => {
+test("layout ops resize the focused split edge", () => {
   const a = win("a", 0, 40, 500, 760)
   const b = win("b", 500, 40, 500, 760)
   const plan = M.layoutOps(clientMap(a, b).a, clientMap(a, b), monitors, cfg)
-  assert.equal(plan.ops.some(op => op.address === "a"), false)
-  assert.ok(plan.ops.some(op => op.address === "b" && op.dx > 0 && op.dy === 0))
+  assert.ok(plan.ops.some(op => op.address === "a" && op.dx > 0 && op.dy === 0 && op.candidate === 0))
+  assert.ok(plan.ops.some(op => op.address === "b" && op.candidate > 0))
   assert.match(M.resizeCommand("a", 10, 0), /window = "address:a"/)
   assert.match(M.resizeCommand("a", 10, 0), /relative = true/)
 })
@@ -124,9 +124,8 @@ test("every unfocused strip is held to its minimum width", () => {
   assert.equal(targets["top-right"].w, 123)
   assert.equal(targets["bottom-right"].w, 123)
   const plan = M.layoutOps(clients.focused, clients, scaled, { ...cfg, widthMultiplier: 0.85 })
-  assert.equal(plan.ops.some(op => op.address === "focused"), false)
-  assert.ok(plan.ops.some(op => op.address === "left" && op.dx < 0))
-  assert.equal(plan.ops.some(op => op.address === "top-right" || op.address === "bottom-right"), false)
+  assert.ok(plan.ops.some(op => op.address === "focused" && op.dx < 0 && op.candidate === 0))
+  assert.ok(plan.ops.some(op => op.address === "left" && op.dx < 0 && op.candidate > 0))
 })
 
 test("floating windows are ignored unless requested", () => {
@@ -170,7 +169,36 @@ test("a focused window in a shared edge column resizes its own boundary", () => 
   const omPlan = M.layoutOps(clients.om, clients, scaled, cfg85)
   assert.ok(footPlan.ops.some(op => op.address === "foot" && op.dx < 0 && op.candidate === 0))
   assert.ok(omPlan.ops.some(op => op.address === "om" && op.dx < 0 && op.candidate === 0))
-  assert.ok(omPlan.ops.some(op => op.address === "foot" && op.dy > 0 && op.candidate === 0))
+  assert.ok(omPlan.ops.some(op => op.address === "om" && op.dy > 0 && op.candidate === 0))
+})
+
+test("stacked rows resize the focused row's own boundary", () => {
+  const top = win("top", 12, 12, 1512, 80)
+  const upper = win("upper", 12, 106, 1512, 80)
+  const middle = win("middle", 12, 200, 1512, 532)
+  const bottom = win("bottom", 12, 746, 1512, 80)
+  const clients = clientMap(top, upper, middle, bottom)
+  const stackedMonitors = M.parseMonitors(JSON.stringify([
+    { id: 0, x: 0, y: 0, width: 1536, height: 864, scale: 1, reserved: [0, 38, 0, 38], focused: true }
+  ]))
+  const cfg85 = { ...cfg, widthMultiplier: 0.85, heightMultiplier: 0.85 }
+  const topPlan = M.layoutOps(clients.top, clients, stackedMonitors, cfg85)
+  const upperPlan = M.layoutOps(clients.upper, clients, stackedMonitors, cfg85)
+  const bottomPlan = M.layoutOps(clients.bottom, clients, stackedMonitors, cfg85)
+  assert.ok(topPlan.ops.some(op => op.address === "top" && op.dy > 0 && op.candidate === 0))
+  assert.ok(upperPlan.ops.some(op => op.address === "upper" && op.dy < 0 && op.candidate === 0))
+  assert.ok(bottomPlan.ops.some(op => op.address === "bottom" && op.dy < 0 && op.candidate === 0))
+  assert.ok(topPlan.ops.some(op => op.address === "middle" && op.dy < 0 && op.candidate > 0))
+  assert.equal(M.layoutOps(clients.middle, clients, stackedMonitors, cfg85).ops.length, 0)
+})
+
+test("target completion tolerates compositor borders and gaps", () => {
+  assert.equal(M.targetReached({ w: 1512, h: 532 }, { w: 1536, h: 532 }), true)
+  assert.equal(M.targetReached({ w: 1200, h: 532 }, { w: 1536, h: 532 }), false)
+})
+
+test("nested splits can promote the focused window to the root", () => {
+  assert.match(M.moveToRootEval(), /hl\.dsp\.layout\("movetoroot"\)/)
 })
 
 test("hover bridge handles floating-mode input changes without polling", () => {

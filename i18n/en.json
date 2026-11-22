@@ -12,6 +12,7 @@
   "behavior.near": "Near full",
   "behavior.near.hint": "Focused windows take the selected share; neighboring windows share the remainder.",
   "section.multipliers": "Focused size",
+  "row.hoverDelay": "Hover delay",
   "row.width": "Width multiplier",
   "row.height": "Height multiplier",
   "hint.noNeighbors": "With no neighbor on an axis, the window claims the full width or height.",

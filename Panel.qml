@@ -9,12 +9,12 @@ import "FocusNowModel.js" as Model
 // only a view over ~/.config/omarchy/focus-now.json.
 Panel {
   id: root
-  moduleName: "eb.focus-now"
+  moduleName: "zumico.focus-now"
   ipcTarget: "focus-now.panel"
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
-  readonly property var service: bar && bar.shell ? bar.shell.serviceFor("eb.focus-now") : null
+  readonly property var service: bar && bar.shell ? bar.shell.serviceFor("zumico.focus-now") : null
   readonly property var cfg: service ? service.config : Model.normalizeConfig({})
   readonly property bool enabled: !!(service && service.config && service.config.enabled)
 
@@ -154,6 +154,13 @@ Panel {
             hint: strings.t("behavior.near.hint")
             checked: root.cfg.expandMode === "near"
             onSwitched: root.setExpansion("near", !checked)
+          }
+
+          StepperRow {
+            label: strings.t("row.hoverDelay")
+            value: root.cfg.hoverDelay + " ms"
+            onDecrease: if (root.service) root.service.stepHoverDelay(-1)
+            onIncrease: if (root.service) root.service.stepHoverDelay(1)
           }
         }
 

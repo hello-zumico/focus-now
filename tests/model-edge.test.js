@@ -37,6 +37,7 @@ test("config normalization covers every supported option", () => {
     expandMode: "fullscreen",
     widthMultiplier: 0.86,
     heightMultiplier: "bad",
+    hoverDelay: "250.6",
     includeFloating: 1,
     nodePath: "relative/node",
     hyprctlPath: "/usr/bin/hyprctl",
@@ -47,6 +48,7 @@ test("config normalization covers every supported option", () => {
   assert.equal(normalized.expandMode, "fullscreen")
   assert.equal(normalized.widthMultiplier, 0.85)
   assert.equal(normalized.heightMultiplier, 0.85)
+  assert.equal(normalized.hoverDelay, 251)
   assert.equal(normalized.includeFloating, true)
   assert.deepEqual(normalized.bins, {
     node: "",
@@ -86,10 +88,14 @@ test("workspace windows exclude unrelated and unmanaged clients", () => {
   const otherWorkspace = win("other-ws", 0, 40, 500, 760, { workspace: { id: 2, name: "2" } })
   const otherMonitor = win("other-monitor", 0, 40, 500, 760, { monitor: 1 })
   const floating = win("float", 0, 40, 500, 760, { floating: true })
+  const popped = win("popped", 0, 40, 500, 760, { floating: true, tags: ["pop"] })
+  const restoring = win("restoring", 500, 40, 500, 760, { tags: ["pop"] })
   const pinned = win("pinned", 0, 40, 500, 760, { pinned: true })
   const unmapped = win("unmapped", 0, 40, 500, 760, { mapped: false })
   const zero = win("zero", 0, 40, 0, 760)
-  const clients = clientMap(focused, same, otherWorkspace, otherMonitor, floating, pinned, unmapped, zero)
+  const clients = clientMap(focused, same, otherWorkspace, otherMonitor, floating, popped, restoring, pinned, unmapped, zero)
+  assert.equal(M.isActionable(clients.popped, true), false)
+  assert.equal(M.isActionable(clients.restoring, true), false)
   assert.deepEqual(
     M.workspaceWindows(clients, clients.focused, false).map(w => w.address).sort(),
     ["focused", "same"]

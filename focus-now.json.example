@@ -4,5 +4,6 @@
   "expandMode": "near",
   "widthMultiplier": 0.85,
   "heightMultiplier": 0.85,
+  "hoverDelay": 120,
   "includeFloating": false
 }

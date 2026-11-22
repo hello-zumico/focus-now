@@ -115,6 +115,7 @@ if (args[0] === "-j") {
   if (key === "activewindow") console.log(JSON.stringify(next.activewindow || {}))
   else if (key === "clients") console.log(JSON.stringify(next.clients || []))
   else if (key === "activeworkspace") console.log(JSON.stringify(next.activeworkspace || {}))
+  else if (key === "workspaces") console.log(JSON.stringify(next.workspaces || []))
   else if (key === "monitors") console.log(JSON.stringify(next.monitors || []))
   else if (key === "cursorpos") {
     if (Array.isArray(next.cursorSequence) && next.cursorSequence.length) {
@@ -201,9 +202,23 @@ function applyArgs(fx, focused, managedAddress = "", managedMode = "", mode = "n
 
 function workspaceState(clients, extra = {}) {
   const active = extra.activewindow || clients[0] || {}
+  const layouts = { "1": "dwindle" }
+  for (const client of clients) {
+    const ws = client.workspace
+    if (ws && ws.tiledLayout) layouts[String(ws.id)] = ws.tiledLayout
+  }
+  if (extra.activeworkspace && extra.activeworkspace.tiledLayout) {
+    layouts[String(extra.activeworkspace.id || 1)] = extra.activeworkspace.tiledLayout
+  }
+  const workspaces = Object.entries(layouts).map(([id, tiledLayout]) => ({
+    id: Number(id),
+    name: String(id),
+    tiledLayout
+  }))
   return {
     activewindow: active,
     activeworkspace: { id: 1, name: "1", tiledLayout: "dwindle", ...extra.activeworkspace },
+    workspaces: extra.workspaces || workspaces,
     clients,
     monitors: [monitor],
     cursor: { x: 0, y: 0 },
@@ -218,6 +233,16 @@ test("a stale focused address exits without compositor side effects", t => {
   const result = runApply(fx, applyArgs(fx, "a"))
   assert.equal(result.stdout, "")
   assert.equal(result.log, "")
+})
+
+test("a pop-tagged restored window is skipped until the wrapper finishes", t => {
+  const restoring = win("restoring", 0, 40, 500, 760, { tags: ["pop"] })
+  const sibling = win("sibling", 500, 40, 500, 760)
+  const fx = fixture(t, workspaceState([restoring, sibling], { activewindow: restoring }))
+  const result = runApply(fx, applyArgs(fx, "restoring", "", "", "near", true))
+  assert.deepEqual(JSON.parse(result.stdout), { address: "restoring", managed: "" })
+  assert.equal(result.log, "")
+  assert.deepEqual(result.state.clients.find(w => w.address === "restoring").size, [500, 760])
 })
 
 test("a user-owned fullscreen state is preserved", t => {
@@ -309,6 +334,23 @@ test("scrolling layout applies the column share and optional centering", t => {
   const b = win("b", 500, 40, 500, 760)
   const fx = fixture(t, workspaceState([a, b], {
     activeworkspace: { tiledLayout: "scrolling" }
+  }))
+  const result = runApply(fx, applyArgs(fx, "a"))
+  assert.equal(result.stdout, '{"address":"a","managed":""}')
+  assert.equal(result.state.colresize, "0.85")
+  assert.equal(result.state.centered, true)
+})
+
+test("a special workspace's layout wins over the reported active workspace", t => {
+  const scratch = { id: -98, name: "special:scratchpad" }
+  const a = win("a", 27, 12, 734, 814, { workspace: scratch })
+  const b = win("b", 775, 12, 734, 814, { workspace: scratch })
+  const fx = fixture(t, workspaceState([a, b], {
+    activewindow: a,
+    workspaces: [
+      { id: 1, name: "1", tiledLayout: "dwindle" },
+      { id: -98, name: "special:scratchpad", tiledLayout: "scrolling" }
+    ]
   }))
   const result = runApply(fx, applyArgs(fx, "a"))
   assert.equal(result.stdout, '{"address":"a","managed":""}')

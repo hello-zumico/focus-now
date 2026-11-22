@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
+import qs.Commons
 import "FocusNowModel.js" as Model
 
 // Focus Now watches Hyprland's active-window stream. With hover focus enabled
@@ -13,18 +14,24 @@ Item {
   property var shell: null
   property var manifest: null
 
-  readonly property string home: Quickshell.env("HOME")
-  readonly property string configPath: home + "/.config/omarchy/focus-now.json"
-  readonly property string pluginDir: (manifest && manifest.__sourceDir)
-    ? manifest.__sourceDir
-    : (home + "/.config/omarchy/plugins/eb.focus-now")
+  readonly property string homeDirectory: Quickshell.env("HOME")
+  property string omarchyPath: Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy"
+  readonly property string configPath: homeDirectory + "/.config/omarchy/focus-now.json"
+  readonly property string pluginDir: manifest && manifest.__sourceDir
+    ? String(manifest.__sourceDir)
+    : homeDirectory + "/.config/omarchy/plugins/zumico.focus-now"
 
   property var rawConfig: ({})
   readonly property var config: Model.normalizeConfig(rawConfig)
   property bool configLoaded: false
+  property bool destroyed: false
+  property bool ipcOwner: false
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
+  readonly property string serviceLockPath: runtimeDir + "/focus-now-" + Quickshell.processId + ".lock"
 
-  property string binTimeout: "/usr/bin/timeout"
-  property string binHyprctl: "/usr/bin/hyprctl"
+  property string timeoutBinary: "/usr/bin/timeout"
+  property string hyprctlBinary: "/usr/bin/hyprctl"
+  property string binQuickshell: "/usr/bin/quickshell"
   property string binNode: ""
 
   property string pendingAddress: ""
@@ -32,6 +39,7 @@ Item {
   property bool applying: false
   property bool hoverHeld: false
   property bool hoverBridgeInstalled: false
+  property bool stateBridgeInstalled: false
   property string managedAddress: ""
   property string managedMode: ""
   property string hoverMonitorAddress: ""
@@ -44,15 +52,15 @@ Item {
 
   function syncBins() {
     var bins = config.bins || {}
-    root.binTimeout = bins.timeout || "/usr/bin/timeout"
-    root.binHyprctl = bins.hyprctl || "/usr/bin/hyprctl"
+    root.timeoutBinary = bins.timeout || "/usr/bin/timeout"
+    root.hyprctlBinary = bins.hyprctl || "/usr/bin/hyprctl"
     if (bins.node) root.binNode = bins.node
   }
 
   onConfigChanged: {
+    if (!root.ipcOwner) return
     syncBins()
-    if (config.enabled && config.hoverFocus) holdHoverFocus()
-    else releaseHoverFocus()
+    syncBridges()
     if (!config.enabled) {
       root.clearManagedWindow()
       pendingAddress = ""
@@ -73,6 +81,7 @@ Item {
       expandMode: normalized.expandMode,
       widthMultiplier: normalized.widthMultiplier,
       heightMultiplier: normalized.heightMultiplier,
+      hoverDelay: normalized.hoverDelay,
       includeFloating: normalized.includeFloating
     }, null, 2) + "\n")
   }
@@ -87,12 +96,14 @@ Item {
   function setHeightMultiplier(value) { saveConfig({ heightMultiplier: Model.nearestMultiplier(value, 0.85) }) }
   function stepWidth(direction) { saveConfig({ widthMultiplier: Model.stepMultiplier(config.widthMultiplier, direction) }) }
   function stepHeight(direction) { saveConfig({ heightMultiplier: Model.stepMultiplier(config.heightMultiplier, direction) }) }
+  function setHoverDelay(value) { saveConfig({ hoverDelay: Model.normalizeHoverDelay(value) }) }
+  function stepHoverDelay(direction) { saveConfig({ hoverDelay: Model.stepHoverDelay(config.hoverDelay, direction) }) }
 
   function nodeCandidates() {
     return [
-      home + "/.local/share/mise/shims/node",
-      home + "/.local/share/mise/installs/node/latest/bin/node",
-      home + "/.local/bin/node",
+      homeDirectory + "/.local/share/mise/shims/node",
+      homeDirectory + "/.local/share/mise/installs/node/latest/bin/node",
+      homeDirectory + "/.local/bin/node",
       "/usr/bin/node",
       "/usr/local/bin/node",
       "/run/current-system/sw/bin/node"
@@ -100,9 +111,9 @@ Item {
   }
 
   function resolveNode() {
-    if (root.binNode) return
-    var command = [root.binTimeout, "-k", "2", "3", "/usr/bin/bash", "-c",
-      'for c in "$@"; do [ -x "$c" ] && { printf "%s" "$c"; exit 0; }; done; exit 1',
+    if (!root.ipcOwner || root.binNode) return
+    var command = [root.timeoutBinary, "-k", "2", "3", "/usr/bin/bash", "-c",
+      'for candidate; do if test -x "$candidate"; then printf "%s" "$candidate"; exit 0; fi; done; exit 1',
       "focus-now-node"]
     var candidates = nodeCandidates()
     for (var i = 0; i < candidates.length; i++) command.push(candidates[i])
@@ -111,9 +122,47 @@ Item {
     nodeProbe.running = true
   }
 
+  function becomeIpcOwner() {
+    if (root.ipcOwner || root.destroyed) return
+    root.ipcOwner = true
+    root.syncBins()
+    root.resolveNode()
+    root.syncBridges()
+  }
+
+  function installStateBridge() {
+    if (!root.ipcOwner || root.stateBridgeInstalled) return
+    root.stateBridgeInstalled = true
+    stateBridgeProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
+      Model.installStateBridgeEval(root.binQuickshell, root.omarchyPath + "/shell", config.expandMode !== "off",
+        config.widthMultiplier, config.heightMultiplier)]
+    stateBridgeProc.running = false
+    stateBridgeProc.running = true
+  }
+
+  function uninstallStateBridge() {
+    if (!root.stateBridgeInstalled) return
+    root.stateBridgeInstalled = false
+    stateBridgeProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
+      Model.uninstallStateBridgeEval()]
+    stateBridgeProc.running = false
+    stateBridgeProc.running = true
+  }
+
+  function syncBridges() {
+    if (!root.ipcOwner || !root.configLoaded) return
+    if (config.enabled && (config.hoverFocus || config.expandMode !== "off")) {
+      root.stateBridgeInstalled = false
+      installStateBridge()
+    } else uninstallStateBridge()
+    if (config.enabled && config.hoverFocus) holdHoverFocus()
+    else releaseHoverFocus()
+  }
+
   function installHoverBridge() {
+    if (!root.ipcOwner) return
     root.hoverBridgeInstalled = true
-    hoverBridgeProc.command = [root.binTimeout, "-k", "2", "3", root.binHyprctl, "eval",
+    hoverBridgeProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
       Model.installHoverBridgeEval()]
     hoverBridgeProc.running = false
     hoverBridgeProc.running = true
@@ -121,13 +170,14 @@ Item {
 
   function uninstallHoverBridge() {
     root.hoverBridgeInstalled = false
-    hoverBridgeProc.command = [root.binTimeout, "-k", "2", "3", root.binHyprctl, "eval",
+    hoverBridgeProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
       Model.uninstallHoverBridgeEval(root.savedFollowMouse >= 0 ? root.savedFollowMouse : 1, root.savedMouseRefocus)]
     hoverBridgeProc.running = false
     hoverBridgeProc.running = true
   }
 
   function holdHoverFocus() {
+    if (!root.ipcOwner) return
     if (!root.hoverHeld) {
       captureMouseProc.running = false
       captureMouseProc.running = true
@@ -156,7 +206,7 @@ Item {
       root.binNode,
       root.pluginDir + "/hover-monitor.js",
       root.managedAddress,
-      root.binHyprctl,
+      root.hyprctlBinary,
       root.managedMode
     ]
     floatingHoverMonitor.running = false
@@ -177,7 +227,7 @@ Item {
       root.managedMode = ""
       return
     }
-    cleanupProc.command = [root.binTimeout, "-k", "2", "3", root.binHyprctl, "eval",
+    cleanupProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
       Model.clearManagedWindowEval(root.managedAddress, root.managedMode)]
     root.managedAddress = ""
     root.managedMode = ""
@@ -189,7 +239,7 @@ Item {
   }
 
   function requestRefresh(address) {
-    if (!config.enabled) return
+    if (!root.ipcOwner || !config.enabled) return
     if (!config.hoverFocus && config.expandMode === "off") return
     address = hyprAddress(address)
     if (!address) return
@@ -205,6 +255,7 @@ Item {
   }
 
   function startAction() {
+    if (!root.ipcOwner) return
     var address = root.pendingAddress
     if (!address || address === "") return
     root.lastHandledAddress = address
@@ -218,14 +269,14 @@ Item {
       root.managedMode = ""
       root.applying = true
       actionProc.command = [
-        root.binTimeout, "-k", "2", "8", root.binNode,
+        root.timeoutBinary, "-k", "2", "8", root.binNode,
         root.pluginDir + "/apply.js",
         address,
         String(config.widthMultiplier),
         String(config.heightMultiplier),
         config.includeFloating ? "1" : "0",
         config.hoverFocus ? "1" : "0",
-        root.binHyprctl,
+        root.hyprctlBinary,
         priorManagedAddress,
         priorManagedMode,
         config.expandMode
@@ -237,7 +288,7 @@ Item {
 
     if (config.hoverFocus) {
       root.applying = true
-      actionProc.command = [root.binTimeout, "-k", "2", "4", root.binHyprctl, "eval", root.centerEval(address)]
+      actionProc.command = [root.timeoutBinary, "-k", "2", "4", root.hyprctlBinary, "eval", root.centerEval(address)]
       actionProc.running = false
       actionProc.running = true
     }
@@ -250,6 +301,7 @@ Item {
       expandMode: config.expandMode,
       widthMultiplier: config.widthMultiplier,
       heightMultiplier: config.heightMultiplier,
+      hoverDelay: config.hoverDelay,
       includeFloating: config.includeFloating,
       active: lastHandledAddress,
       pending: pendingAddress,
@@ -259,6 +311,7 @@ Item {
       applying: applying,
       hoverHeld: hoverHeld,
       hoverBridge: hoverBridgeInstalled,
+      stateBridge: stateBridgeInstalled,
       hoverMonitor: floatingHoverMonitor.running,
       node: binNode
     })
@@ -271,25 +324,29 @@ Item {
     printErrors: false
     onFileChanged: reload()
     onLoaded: {
-      try { root.rawConfig = JSON.parse(text() || "{}") || {} }
+      if (!root || root.destroyed) return
+      var source = ""
+      try { source = text() || "" } catch (e) { source = "" }
+      try { root.rawConfig = JSON.parse(source || "{}") || {} }
       catch (e) { root.rawConfig = {} }
       root.configLoaded = true
       root.syncBins()
       root.resolveNode()
-      if (root.config.enabled && root.config.hoverFocus) root.holdHoverFocus()
+      root.syncBridges()
     }
     onLoadFailed: {
+      if (!root || root.destroyed) return
       root.rawConfig = {}
       root.configLoaded = true
       root.syncBins()
       root.resolveNode()
-      if (root.config.enabled && root.config.hoverFocus) root.holdHoverFocus()
+      root.syncBridges()
     }
   }
 
   Timer {
     id: debounce
-    interval: 120
+    interval: root.configLoaded ? root.config.hoverDelay : 120
     repeat: false
     onTriggered: root.startAction()
   }
@@ -303,11 +360,33 @@ Item {
     }
   }
 
+  Timer {
+    id: stateBridgeReload
+    interval: 250
+    repeat: false
+    onTriggered: {
+      if (root.config.enabled && (root.config.hoverFocus || root.config.expandMode !== "off")) {
+        root.stateBridgeInstalled = false
+        root.installStateBridge()
+      }
+    }
+  }
+
+  Process {
+    id: ipcLockProc
+    command: ["/usr/bin/mkdir", root.serviceLockPath]
+    onExited: function(code) {
+      if (!root || root.destroyed) return
+      if (code === 0) root.becomeIpcOwner()
+    }
+  }
+
   Process {
     id: actionProc
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (!root || root.destroyed) return
         var result = Model.parseJson(text, null)
         if (result && result.address) {
           root.managedAddress = result.managed ? String(result.address) : ""
@@ -317,6 +396,7 @@ Item {
       }
     }
     onExited: {
+      if (!root || root.destroyed) return
       root.applying = false
       if (root.pendingAddress && root.pendingAddress !== root.lastHandledAddress) debounce.restart()
     }
@@ -326,6 +406,7 @@ Item {
     id: floatingHoverMonitor
     stdout: SplitParser {
       onRead: function(line) {
+        if (!root || root.destroyed) return
         var result = Model.parseJson(line, null)
         if (!result || result.address !== root.hoverMonitorAddress) return
         if (result.reason === "left") {
@@ -338,15 +419,27 @@ Item {
         }
       }
     }
-    onExited: root.hoverMonitorAddress = ""
+    onExited: {
+      if (root && !root.destroyed) root.hoverMonitorAddress = ""
+    }
   }
 
   Process {
     id: hoverBridgeProc
     onExited: function(code) {
-      if (code !== 0 && root.hoverBridgeInstalled) {
+      if (root && !root.destroyed && code !== 0 && root.hoverBridgeInstalled) {
         root.hoverBridgeInstalled = false
         root.log("could not install floating hover bridge")
+      }
+    }
+  }
+
+  Process {
+    id: stateBridgeProc
+    onExited: function(code) {
+      if (root && !root.destroyed && code !== 0 && root.stateBridgeInstalled) {
+        root.stateBridgeInstalled = false
+        root.log("could not install window-state bridge")
       }
     }
   }
@@ -357,16 +450,16 @@ Item {
 
   Process {
     id: captureMouseProc
-    command: [root.binTimeout, "-k", "2", "3", "/usr/bin/bash", "-c",
-      root.binHyprctl + " getoption input:follow_mouse -j; printf '\\n---S---\\n'; " +
-      root.binHyprctl + " getoption input:mouse_refocus -j"]
+    command: [root.timeoutBinary, "-k", "2", "3", "/usr/bin/bash", "-c",
+      root.hyprctlBinary + " getoption input:follow_mouse -j; printf '\\n---S---\\n'; " +
+      root.hyprctlBinary + " getoption input:mouse_refocus -j"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (!root.config.enabled || !root.config.hoverFocus) return
-        var parts = String(text || "").split("\n---S---\n")
-        var follow = Model.parseJson(parts[0] || "{}", {})
-        var refocus = Model.parseJson(parts.length > 1 ? parts[1] : "{}", {})
+        if (!root || root.destroyed || !root.config.enabled || !root.config.hoverFocus) return
+        var sections = String(text || "").split("\n---S---\n")
+        var follow = Model.parseJson(sections[0] || "{}", {})
+        var refocus = Model.parseJson(sections.length > 1 ? sections[1] : "{}", {})
         var savedFollow = Number(follow && follow.int)
         if (isFinite(savedFollow)) root.savedFollowMouse = savedFollow
         if (refocus && typeof refocus.bool === "boolean") root.savedMouseRefocus = refocus.bool
@@ -375,7 +468,7 @@ Item {
       }
     }
     onExited: function(code) {
-      if (code !== 0 && !root.hoverHeld) root.log("could not capture mouse focus settings")
+      if (root && !root.destroyed && code !== 0 && !root.hoverHeld) root.log("could not capture mouse focus settings")
     }
   }
 
@@ -384,6 +477,7 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (!root || root.destroyed) return
         var found = String(text || "").trim()
         if (found.charAt(0) === "/") root.binNode = found
         else root.log("node not found; automatic expansion is disabled")
@@ -394,12 +488,13 @@ Item {
   Connections {
     target: Hyprland
     function onRawEvent(event) {
-      var name = String(event && event.name ? event.name : "")
-      if (name === "configreloaded") {
+      if (!root || root.destroyed || !root.ipcOwner) return
+      var eventName = String(event && event.name ? event.name : "")
+      if (eventName === "configreloaded") {
         if (root.hoverBridgeInstalled) hoverBridgeReload.restart()
+        if (root.stateBridgeInstalled) stateBridgeReload.restart()
         return
       }
-      if (name !== "activewindowv2" && name !== "activewindow") return
       var data = []
       try {
         if (event && typeof event.parse === "function") data = event.parse(4) || []
@@ -407,6 +502,12 @@ Item {
         data = []
       }
       var address = data.length ? String(data[0] || "") : ""
+      if (eventName === "changefloatingmode") {
+        if (address) root.requestRefresh(address)
+        else snapshotProbe.running = true
+        return
+      }
+      if (eventName !== "activewindowv2" && eventName !== "activewindow") return
       if (address) root.requestRefresh(address)
       else snapshotProbe.running = true
     }
@@ -414,35 +515,58 @@ Item {
 
   Process {
     id: snapshotProbe
-    command: [root.binTimeout, "-k", "2", "3", root.binHyprctl, "-j", "activewindow"]
+    command: [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "-j", "activewindow"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (!root || root.destroyed || !root.ipcOwner) return
         var active = Model.parseActiveWindow(text)
         if (active && active.address) root.requestRefresh(active.address)
       }
     }
   }
 
+  Component.onCompleted: {
+    ipcLockProc.running = true
+  }
+
   Component.onDestruction: {
+    root.destroyed = true
     debounce.running = false
     hoverBridgeReload.stop()
+    stateBridgeReload.stop()
+    if (ipcLockProc.running) ipcLockProc.running = false
     if (actionProc.running) actionProc.running = false
     if (captureMouseProc.running) captureMouseProc.running = false
     if (hoverBridgeProc.running) hoverBridgeProc.running = false
+    if (stateBridgeProc.running) stateBridgeProc.running = false
     if (snapshotProbe.running) snapshotProbe.running = false
+    if (nodeProbe.running) nodeProbe.running = false
+    if (floatingHoverMonitor.running) floatingHoverMonitor.running = false
+    if (!root.ipcOwner) return
+
+    root.ipcOwner = false
+    Quickshell.execDetached(["/usr/bin/rmdir", root.serviceLockPath])
     root.clearManagedWindow(true)
+    if (root.stateBridgeInstalled) {
+      root.stateBridgeInstalled = false
+      stateBridgeProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
+        Model.uninstallStateBridgeEval()]
+      stateBridgeProc.startDetached()
+    }
     if (root.hoverHeld || root.hoverBridgeInstalled) {
       root.hoverHeld = false
       root.hoverBridgeInstalled = false
-      hoverBridgeProc.command = [root.binTimeout, "-k", "2", "3", root.binHyprctl, "eval",
+      hoverBridgeProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
         Model.uninstallHoverBridgeEval(root.savedFollowMouse >= 0 ? root.savedFollowMouse : 1, root.savedMouseRefocus)]
       hoverBridgeProc.startDetached()
     }
   }
 
-  IpcHandler {
-    target: "focus-now"
+  ShellIpc {
+    id: ipcHandler
+    target: root.ipcOwner ? "focus-now" : ""
+    enabled: root.ipcOwner
 
     function status(): string { return root.statusJson() }
     function ping(): string { return "ok" }
@@ -461,6 +585,9 @@ Item {
     function widthDown(): string { root.stepWidth(-1); return String(root.config.widthMultiplier) }
     function heightUp(): string { root.stepHeight(1); return String(root.config.heightMultiplier) }
     function heightDown(): string { root.stepHeight(-1); return String(root.config.heightMultiplier) }
+    function hoverDelay(value: string): string { root.setHoverDelay(Number(value)); return String(root.config.hoverDelay) }
+    function hoverDelayUp(): string { root.stepHoverDelay(1); return String(root.config.hoverDelay) }
+    function hoverDelayDown(): string { root.stepHoverDelay(-1); return String(root.config.hoverDelay) }
     function refresh(): string {
       if (root.lastHandledAddress) root.requestRefresh(root.lastHandledAddress)
       else snapshotProbe.running = true

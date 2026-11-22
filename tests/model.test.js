@@ -272,6 +272,28 @@ test("hover bridge handles floating-mode input changes without polling", () => {
   assert.match(uninstall, /restore_mouse_refocus ~= nil/)
 })
 
+test("state bridge refreshes only when the active window changes floating state", () => {
+  const install = M.installStateBridgeEval("/opt/my quickshell", "/opt/my shell", true, 0.75, 0.6)
+
+  assert.match(install, /bridge\.expand_enabled = true/)
+  assert.match(install, /bridge\.width_multiplier = 0\.75/)
+  assert.match(install, /bridge\.height_multiplier = 0\.6/)
+  assert.match(install, /hl\.on\("window\.update_rules"/)
+  assert.match(install, /bridge\.floating_states\[window\.address\] = current/)
+  assert.match(install, /active\.address ~= window\.address/)
+  assert.match(install, /focus_now_pop_restore/)
+  assert.match(install, /deferred_refresh\(window\.address\)/)
+  assert.match(install, /bridge\.deferred_refresh = deferred_refresh/)
+  assert.match(install, /active\.address ~= address[\s\S]*hl\.timer\(function\(\) refresh_if_active\(address\) end, \{ timeout = timeout or 350/)
+  assert.match(install, /ipc call focus-now refresh/)
+  assert.match(install, /'\/opt\/my quickshell' -p '\/opt\/my shell'/)
+  assert.doesNotMatch(install, /while|sleep/)
+
+  const uninstall = M.uninstallStateBridgeEval()
+  assert.match(uninstall, /subscription:remove/)
+  assert.match(uninstall, /focus_now_state_bridge", nil/)
+})
+
 test("floating hover monitor restores on leave and reports re-entry", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "focus-now-hover-"))
   const activePath = path.join(dir, "active.json")

@@ -15,20 +15,33 @@ Settings live in `~/.config/omarchy/focus-now.json` and hot-reload:
   "expandMode": "near",
   "widthMultiplier": 0.85,
   "heightMultiplier": 0.85,
+  "hoverDelay": 120,
   "includeFloating": false
 }
 ```
 
 Allowed multipliers: `0.50`, `0.60`, `0.67`, `0.75`, `0.80`, `0.85`, `0.90`, `0.95`, `1.00`.
 
-`expandMode` is one of `off`, `fullscreen`, or `near`; fullscreen and near-full are mutually exclusive.
+`expandMode` is one of `off`, `fullscreen`, or `near`; fullscreen and near-full are mutually exclusive. `hoverDelay` is the dwell time in milliseconds before a focused window expands (0–2000, default 120).
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/hello-zumico/focus-now.git --enable
+```
+
+Remove it with:
+
+```bash
+omarchy plugin remove zumico.focus-now
+```
 
 ## Install for development
 
 ```bash
-rsync -a --delete --exclude .git /path/to/focus-now/ ~/.config/omarchy/plugins/eb.focus-now/
+rsync -a --delete --exclude .git /path/to/focus-now/ ~/.config/omarchy/plugins/zumico.focus-now/
 omarchy-shell shell rescanPlugins
-omarchy plugin enable eb.focus-now --section right
+omarchy plugin enable zumico.focus-now --section right
 ```
 
 Right-click the bar icon to toggle the plugin. Click it for the switches and width/height selectors.
@@ -58,8 +71,6 @@ omarchy-shell focus-now refresh
 - Floating windows are ignored unless `includeFloating` is set. On Omarchy floating workspaces, that setting also controls whether Focus Now keeps hover focus active; with it off, Omarchy's click-to-focus behavior is preserved.
 - Fullscreen/maximized state created by the user is preserved; Focus Now only clears the exact compositor state it applied itself.
 - The plugin runs unsandboxed inside `omarchy-shell`, like every Omarchy shell plugin.
-
-The layout partitioning approach is adapted from FocusPlease (MIT) and simplified for multiplier-driven focus expansion.
 
 ## Develop
 

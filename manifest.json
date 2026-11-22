@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "id": "eb.focus-now",
+  "id": "zumico.focus-now",
   "name": "Focus Now",
-  "version": "0.2.10",
-  "author": "eb",
+  "version": "0.3.0",
+  "author": "Zumico",
   "license": "MIT",
   "description": "Focus the hovered window, center it, fullscreen it, or grow it to a configurable share while neighbors make room.",
   "kinds": [
     "service",
     "bar-widget"
   ],
-  "keepLoaded": true,
+  "keepLoaded": false,
   "entryPoints": {
     "service": "Service.qml",
     "barWidget": "Panel.qml"

@@ -264,7 +264,7 @@ test("hover bridge handles floating-mode input changes without polling", () => {
   assert.match(install, /omarchy-floating-workspace/)
   assert.match(install, /restore_follow_mouse = active_workspace_floats\(\) and 0/)
   assert.match(install, /follow_mouse = 1/)
-  assert.match(install, /mouse_refocus = true/)
+  assert.match(install, /mouse_refocus = false/)
   const uninstall = M.uninstallHoverBridgeEval(0, false)
   assert.match(uninstall, /subscription:remove/)
   assert.match(uninstall, /o\.workspace_mode = bridge\.workspace_mode/)
@@ -276,6 +276,9 @@ test("hover bridge handles floating-mode input changes without polling", () => {
   const tiledOnly = M.installHoverBridgeEval(false)
   assert.match(tiledOnly, /follow_mouse = \(active_workspace_floats\(\) and 0 or 1\)/)
   assert.doesNotMatch(tiledOnly, /follow_mouse = 1,/)
+
+  const refocused = M.installHoverBridgeEval(true, true)
+  assert.match(refocused, /mouse_refocus = true/)
 })
 
 test("state bridge refreshes only when the active window changes floating state", () => {

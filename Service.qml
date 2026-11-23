@@ -6,8 +6,9 @@ import qs.Commons
 import "FocusNowModel.js" as Model
 
 // Focus Now watches Hyprland's active-window stream. With hover focus enabled
-// it temporarily owns input.follow_mouse/mouse_refocus, restoring the previous
-// values whenever the option, service, or plugin is disabled.
+// it temporarily owns input.follow_mouse/mouse_refocus (follow_mouse=1,
+// refocus off), restoring the previous values whenever the option, service,
+// or plugin is disabled.
 Item {
   id: root
 
@@ -88,13 +89,15 @@ Item {
       hoverDelay: normalized.hoverDelay,
       fullscreenDelay: normalized.fullscreenDelay,
       includeFloating: normalized.includeFloating,
-      stickyFullscreen: normalized.stickyFullscreen
+      stickyFullscreen: normalized.stickyFullscreen,
+      mouseRefocus: normalized.mouseRefocus
     }, null, 2) + "\n")
   }
 
   function setEnabled(value) { saveConfig({ enabled: !!value }) }
   function setHoverFocus(value) { saveConfig({ hoverFocus: !!value }) }
   function setStickyFullscreen(value) { saveConfig({ stickyFullscreen: !!value }) }
+  function setMouseRefocus(value) { saveConfig({ mouseRefocus: !!value }) }
   function setMode(mode) {
     if (Model.EXPAND_MODES.indexOf(mode) < 0) mode = "off"
     saveConfig({ expandMode: mode })
@@ -172,7 +175,7 @@ Item {
     if (!root.ipcOwner) return
     root.hoverBridgeInstalled = true
     hoverBridgeProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
-      Model.installHoverBridgeEval(config.includeFloating)]
+      Model.installHoverBridgeEval(config.includeFloating, config.mouseRefocus)]
     hoverBridgeProc.running = false
     hoverBridgeProc.running = true
   }
@@ -323,6 +326,7 @@ Item {
       fullscreenDelay: config.fullscreenDelay,
       includeFloating: config.includeFloating,
       stickyFullscreen: config.stickyFullscreen,
+      mouseRefocus: config.mouseRefocus,
       active: lastHandledAddress,
       pending: pendingAddress,
       managed: managedAddress,

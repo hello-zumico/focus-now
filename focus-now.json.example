@@ -7,5 +7,6 @@
   "hoverDelay": 120,
   "fullscreenDelay": 5000,
   "includeFloating": false,
-  "stickyFullscreen": false
+  "stickyFullscreen": false,
+  "mouseRefocus": false
 }

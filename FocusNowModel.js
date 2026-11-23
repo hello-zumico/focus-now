@@ -89,6 +89,7 @@ function normalizeConfig(raw) {
     fullscreenDelay: normalizeFullscreenDelay(source.fullscreenDelay),
     includeFloating: !!source.includeFloating,
     stickyFullscreen: !!source.stickyFullscreen,
+    mouseRefocus: !!source.mouseRefocus,
     bins: {
       node: absolutePath(source.nodePath),
       hyprctl: absolutePath(source.hyprctlPath),
@@ -519,7 +520,7 @@ function activeWorkspaceFloatsEval() {
   return 'local function active_workspace_floats() local workspace = hl.get_active_workspace(); if not workspace then return false end; for _, window in ipairs(hl.get_workspace_windows(tostring(workspace.id))) do for _, tag in ipairs(window.tags or {}) do if tag == "omarchy-floating-workspace" then return true end end end; local state_home = os.getenv("XDG_STATE_HOME"); if not state_home or state_home == "" then state_home = (os.getenv("HOME") or "") .. "/.local/state" end; local file = io.open(state_home .. "/omarchy/workspace-layouts/" .. tostring(workspace.id) .. ".lua", "r"); if file then local text = file:read("*a") or ""; file:close(); return text:match([[mode%s*=%s*"floating"]]) ~= nil end; file = io.open(state_home .. "/omarchy/workspace-layouts/default.lua", "r"); if file then local text = file:read("*a") or ""; file:close(); return text:match([[default%s*=%s*"floating"]]) ~= nil end; return false end'
 }
 
-function installHoverBridgeEval(includeFloating) {
+function installHoverBridgeEval(includeFloating, refocus) {
   var appliedFollow = includeFloating ? 1 : '(active_workspace_floats() and 0 or 1)'
   return [
     'local bridge = rawget(_G, "focus_now_hover_bridge") or {}',
@@ -529,12 +530,12 @@ function installHoverBridgeEval(includeFloating) {
     'bridge.workspace_subscription = nil; bridge.monitor_subscription = nil; bridge.wrapped_workspace_mode = nil',
     'bridge.workspace_mode = type(o) == "table" and o.workspace_mode or nil',
     activeWorkspaceFloatsEval(),
-    'local function apply_hover_focus() hl.timer(function() bridge.restore_follow_mouse = active_workspace_floats() and 0 or hl.get_config("input.follow_mouse"); bridge.restore_mouse_refocus = hl.get_config("input.mouse_refocus"); ' + mouseConfigEval(appliedFollow, true) + ' end, { type = "oneshot", timeout = 1 }) end',
+    'local function apply_hover_focus() hl.timer(function() bridge.restore_follow_mouse = active_workspace_floats() and 0 or hl.get_config("input.follow_mouse"); bridge.restore_mouse_refocus = hl.get_config("input.mouse_refocus"); ' + mouseConfigEval(appliedFollow, refocus) + ' end, { type = "oneshot", timeout = 1 }) end',
     'if bridge.workspace_mode then bridge.wrapped_workspace_mode = function(spec) local result = bridge.workspace_mode(spec); apply_hover_focus(); return result end; o.workspace_mode = bridge.wrapped_workspace_mode end',
     'bridge.workspace_subscription = hl.on("workspace.active", apply_hover_focus)',
     'bridge.monitor_subscription = hl.on("monitor.focused", apply_hover_focus)',
     'rawset(_G, "focus_now_hover_bridge", bridge)',
-    mouseConfigEval(appliedFollow, true)
+    mouseConfigEval(appliedFollow, refocus)
   ].join('; ')
 }
 

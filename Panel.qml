@@ -160,6 +160,14 @@ Panel {
             onDecrease: if (root.service) root.service.stepHoverDelay(-1)
             onIncrease: if (root.service) root.service.stepHoverDelay(1)
           }
+
+          ToggleRow {
+            visible: root.cfg.hoverFocus
+            label: strings.t("behavior.refocus")
+            hint: strings.t("behavior.refocus.hint")
+            checked: root.cfg.mouseRefocus
+            onSwitched: if (root.service) root.service.setMouseRefocus(!root.cfg.mouseRefocus)
+          }
         }
 
         PanelSeparator {

@@ -208,14 +208,17 @@ function applyOneLayoutPass() {
 
 try {
   if (active() !== requestedAddress) process.exit(0)
-  restorePreviousFloating(expandMode !== "near" || !includeFloating)
-  if (!(stickyFullscreen && expandMode === "fullscreen") &&
+  const initial = snapshot()
+  const previousWindow = previousAddress ? initial[previousAddress] : null
+  const targetWindow = initial[requestedAddress]
+  const sameWorkspace = !!(previousWindow && targetWindow &&
+    String(previousWindow.workspaceId) === String(targetWindow.workspaceId))
+  if (sameWorkspace) restorePreviousFloating(expandMode !== "near" || !includeFloating)
+  if (sameWorkspace && !(stickyFullscreen && expandMode === "fullscreen") &&
       previousAddress && previousAddress !== requestedAddress &&
       (previousMode === "fullscreen" || previousMode === "maximized")) {
     lua(Model.clearManagedFullscreenEval(previousAddress, previousMode))
   }
-
-  const initial = snapshot()
   if (!allowManagedMode(initial[requestedAddress], initial)) {
     emit("")
     process.exit(0)

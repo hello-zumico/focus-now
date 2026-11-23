@@ -86,11 +86,18 @@ function fullscreenStates(code) {
     }
   }
   if (/other\\.address ~= target\\.address/.test(code)) {
+    const wsScoped = /other\\.workspace\\.id == target\\.workspace\\.id/.test(code)
+    const targetWin = next.clients.find(w => w.address === target)
+    const targetWs = targetWin && targetWin.workspace ? targetWin.workspace.id : undefined
     for (const client of next.clients) {
-      if (client.address !== target && client.fullscreen && client.fullscreenClient === 1) {
-        client.fullscreen = 0
-        client.fullscreenClient = 0
+      if (client.address === target) continue
+      if (!(client.fullscreen && client.fullscreenClient === 1)) continue
+      if (wsScoped) {
+        const clientWs = client.workspace ? client.workspace.id : undefined
+        if (targetWs === undefined || clientWs !== targetWs) continue
       }
+      client.fullscreen = 0
+      client.fullscreenClient = 0
     }
   }
   if (/internal = 1, client = 1/.test(code)) {
@@ -507,6 +514,41 @@ test("refocusing a sticky fullscreen window re-tracks it as managed", t => {
   assert.equal(result.state.clients[0].fullscreenClient, 1)
   assert.equal(result.state.clients[1].fullscreen, 2)
   assert.equal(result.state.clients[1].fullscreenClient, 1)
+})
+
+test("near mode leaves managed fullscreen on other workspaces alone", t => {
+  const a = win("a", 0, 40, 500, 760, { fullscreen: 2, fullscreenClient: 1 })
+  const b = win("b", 0, 40, 500, 760, { workspace: { id: 2, name: "2" } })
+  const fx = fixture(t, workspaceState([a, b], {
+    activewindow: b,
+    activeworkspace: { id: 2, name: "2" }
+  }))
+  const result = runApply(fx, applyArgs(fx, "b"))
+  assert.equal(result.state.clients[0].fullscreen, 2)
+  assert.equal(result.state.clients[0].fullscreenClient, 1)
+})
+
+test("a managed window on another workspace keeps its state", t => {
+  const a = win("a", 0, 40, 500, 760, { fullscreen: 1, fullscreenClient: 1 })
+  const b = win("b", 0, 40, 500, 760, { workspace: { id: 2, name: "2" } })
+  const fx = fixture(t, workspaceState([a, b], {
+    activewindow: b,
+    activeworkspace: { id: 2, name: "2" }
+  }))
+  const result = runApply(fx, applyArgs(fx, "b", "a", "maximized", "near"))
+  assert.doesNotMatch(result.log, /target\.fullscreen == 1 and target\.fullscreen_client == 1/)
+  assert.equal(result.state.clients[0].fullscreen, 1)
+  assert.equal(result.state.clients[0].fullscreenClient, 1)
+})
+
+test("a managed window on the same workspace is still cleared", t => {
+  const a = win("a", 0, 40, 500, 760, { fullscreen: 1, fullscreenClient: 1 })
+  const b = win("b", 500, 40, 500, 760)
+  const fx = fixture(t, workspaceState([a, b], { activewindow: b }))
+  const result = runApply(fx, applyArgs(fx, "b", "a", "maximized", "near"))
+  assert.match(result.log, /target\.fullscreen == 1 and target\.fullscreen_client == 1/)
+  assert.equal(result.state.clients[0].fullscreen, 0)
+  assert.equal(result.state.clients[0].fullscreenClient, 0)
 })
 
 test("a repeated nested layout falls back to movetoroot only once", t => {

@@ -651,8 +651,9 @@ function clearManagedFullscreenEval(address, mode) {
 function clearOtherFullscreenEval(address) {
   return 'local target = nil; for _, w in ipairs(hl.get_windows()) do ' +
     'if w.address == "' + String(address) + '" then target = w break end end; ' +
-    'if target then for _, other in ipairs(hl.get_windows()) do ' +
-    'if other.address ~= target.address and other.fullscreen ~= 0 and other.fullscreen_client == 1 then ' +
+    'if target and target.workspace then for _, other in ipairs(hl.get_windows()) do ' +
+    'if other.address ~= target.address and other.fullscreen ~= 0 and other.fullscreen_client == 1 ' +
+    'and other.workspace and other.workspace.id == target.workspace.id then ' +
     'hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 0, client = 0, window = "address:" .. other.address })) end ' +
     'end end'
 }

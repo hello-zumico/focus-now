@@ -38,7 +38,9 @@ test("config normalization covers every supported option", () => {
     widthMultiplier: 0.86,
     heightMultiplier: "bad",
     hoverDelay: "250.6",
+    fullscreenDelay: "4500.4",
     includeFloating: 1,
+    stickyFullscreen: 1,
     nodePath: "relative/node",
     hyprctlPath: "/usr/bin/hyprctl",
     timeoutPath: "/usr/bin/timeout"
@@ -49,12 +51,25 @@ test("config normalization covers every supported option", () => {
   assert.equal(normalized.widthMultiplier, 0.85)
   assert.equal(normalized.heightMultiplier, 0.85)
   assert.equal(normalized.hoverDelay, 251)
+  assert.equal(normalized.fullscreenDelay, 4500)
   assert.equal(normalized.includeFloating, true)
+  assert.equal(normalized.stickyFullscreen, true)
   assert.deepEqual(normalized.bins, {
     node: "",
     hyprctl: "/usr/bin/hyprctl",
     timeout: "/usr/bin/timeout"
   })
+})
+
+test("fullscreen delay clamps to the 1s floor so the release hold cannot loop", () => {
+  assert.equal(M.normalizeFullscreenDelay(0), 1000)
+  assert.equal(M.normalizeFullscreenDelay(250), 1000)
+  assert.equal(M.normalizeFullscreenDelay(999), 1000)
+  assert.equal(M.normalizeFullscreenDelay(1500.4), 1500)
+  assert.equal(M.normalizeFullscreenDelay(99999), 60000)
+  assert.equal(M.normalizeFullscreenDelay("bad"), 5000)
+  assert.equal(M.stepFullscreenDelay(1000, -1), 1000)
+  assert.equal(M.stepFullscreenDelay(1000, 1), 1500)
 })
 
 test("window and client parsing tolerates Hyprland variants and malformed input", () => {
@@ -65,7 +80,7 @@ test("window and client parsing tolerates Hyprland variants and malformed input"
   ]))
   assert.equal(parsed.a.cls, "initial")
   assert.equal(parsed.a.workspaceId, "special:scratchpad")
-  assert.equal(parsed.a.fullscreen, true)
+  assert.equal(parsed.a.fullscreen, false)
   assert.deepEqual(parsed.a.tags, ["tag"])
   assert.equal(Object.keys(parsed).length, 1)
   assert.deepEqual(M.parseClients("not json"), {})
@@ -200,7 +215,7 @@ test("fullscreen cleanup commands distinguish target and other windows", () => {
   assert.match(clearTarget, /internal = 0, client = 0/)
   const clearOthers = M.clearOtherFullscreenEval("a")
   assert.match(clearOthers, /other\.address ~= target\.address/)
-  assert.match(clearOthers, /other\.fullscreen ~= 0 or other\.fullscreen_client ~= 0/)
+  assert.match(clearOthers, /other\.fullscreen ~= 0 and other\.fullscreen_client == 1/)
 })
 
 test("unknown managed fullscreen modes are never treated as owned", () => {

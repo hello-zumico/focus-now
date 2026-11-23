@@ -5,12 +5,12 @@ const path = require("node:path")
 const Model = require(path.join(__dirname, "FocusNowModel.js"))
 
 const [address, widthValue, heightValue, floatingValue, centerValue, hyprctlPath,
-  priorAddress, priorMode, requestedMode] = process.argv.slice(2)
+  priorAddress, priorMode, requestedMode, stickyValue] = process.argv.slice(2)
 const requestedAddress = String(address || "")
 const hyprctl = String(hyprctlPath || "/usr/bin/hyprctl")
 const expandMode = String(requestedMode || "near")
 const includeFloating = floatingValue === "1"
-const shouldCenter = centerValue === "1"
+const stickyFullscreen = stickyValue === "1"
 const previousAddress = String(priorAddress || "")
 const previousMode = String(priorMode || "")
 const options = {
@@ -107,6 +107,8 @@ function restorePreviousFloating(restoreCurrent) {
 
 function allowManagedMode(target, clients) {
   if (!target || !target.fullscreen) return !!target
+  if (expandMode === "fullscreen" &&
+      Model.isManagedFullscreen(target, requestedAddress, "fullscreen")) return true
   if (!Model.isManagedFullscreen(target, previousAddress, previousMode)) return false
   if (Model.managedFullscreenApplies(target, previousAddress, previousMode, expandMode, onlyWindow(clients))) return true
   lua(Model.clearManagedFullscreenEval(requestedAddress, previousMode))
@@ -114,7 +116,7 @@ function allowManagedMode(target, clients) {
 }
 
 function applyFullscreenMode() {
-  lua(Model.clearOtherFullscreenEval(requestedAddress))
+  if (!stickyFullscreen) lua(Model.clearOtherFullscreenEval(requestedAddress))
   lua(Model.setManagedFullscreenEval(requestedAddress))
   emit("fullscreen")
 }
@@ -152,7 +154,7 @@ function applyScrollingMode() {
     'local target = nil; for _, w in ipairs(hl.get_windows()) do if ' + selector +
     ' then target = w break end end; if target and target.workspace and ' +
     'target.workspace.tiled_layout == "scrolling" then hl.dispatch(hl.dsp.layout("colresize ' +
-    share + '"));' + (shouldCenter ? ' hl.dispatch(hl.dsp.layout("center"));' : '') + ' end'
+    share + '")) end'
   )
 }
 
@@ -207,6 +209,11 @@ function applyOneLayoutPass() {
 try {
   if (active() !== requestedAddress) process.exit(0)
   restorePreviousFloating(expandMode !== "near" || !includeFloating)
+  if (!(stickyFullscreen && expandMode === "fullscreen") &&
+      previousAddress && previousAddress !== requestedAddress &&
+      (previousMode === "fullscreen" || previousMode === "maximized")) {
+    lua(Model.clearManagedFullscreenEval(previousAddress, previousMode))
+  }
 
   const initial = snapshot()
   if (!allowManagedMode(initial[requestedAddress], initial)) {
@@ -218,6 +225,8 @@ try {
     applyFullscreenMode()
     process.exit(0)
   }
+
+  lua(Model.clearOtherFullscreenEval(requestedAddress))
 
   const current = snapshot()[requestedAddress]
   if (!Model.isActionable(current, includeFloating)) {

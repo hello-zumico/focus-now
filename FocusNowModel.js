@@ -1,13 +1,17 @@
 // Pure Hyprland state parsing and layout planning for Focus Now. The planner
 // uses rectangle intervals and axis allocations rather than remembered
 // per-window base sizes.
-var MULTIPLIERS = [0.5, 0.6, 0.67, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
+var MULTIPLIERS = [0.25, 0.33, 0.4, 0.5, 0.6, 0.67, 0.75, 0.8, 0.85, 0.9, 0.95]
 var EXPAND_MODES = ["off", "fullscreen", "near"]
 var EDGE_TOLERANCE = 24
 var MINIMUM_SIZE = 80
 var HOVER_DELAY_DEFAULT = 120
 var HOVER_DELAY_MAX = 2000
 var HOVER_DELAY_STEP = 50
+var FULLSCREEN_DELAY_DEFAULT = 5000
+var FULLSCREEN_DELAY_MIN = 1000
+var FULLSCREEN_DELAY_MAX = 60000
+var FULLSCREEN_DELAY_STEP = 500
 
 function parseJson(raw, fallback) {
   var decoded = fallback
@@ -64,6 +68,14 @@ function stepHoverDelay(value, direction) {
   return clamp(normalizeHoverDelay(value) + (direction < 0 ? -1 : 1) * HOVER_DELAY_STEP, 0, HOVER_DELAY_MAX)
 }
 
+function normalizeFullscreenDelay(value) {
+  return clamp(Math.round(numberOr(value, FULLSCREEN_DELAY_DEFAULT)), FULLSCREEN_DELAY_MIN, FULLSCREEN_DELAY_MAX)
+}
+
+function stepFullscreenDelay(value, direction) {
+  return clamp(normalizeFullscreenDelay(value) + (direction < 0 ? -1 : 1) * FULLSCREEN_DELAY_STEP, FULLSCREEN_DELAY_MIN, FULLSCREEN_DELAY_MAX)
+}
+
 function normalizeConfig(raw) {
   var source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
   var expandMode = EXPAND_MODES.indexOf(source.expandMode) >= 0 ? source.expandMode : "near"
@@ -74,7 +86,9 @@ function normalizeConfig(raw) {
     widthMultiplier: nearestMultiplier(source.widthMultiplier, 0.85),
     heightMultiplier: nearestMultiplier(source.heightMultiplier, 0.85),
     hoverDelay: normalizeHoverDelay(source.hoverDelay),
+    fullscreenDelay: normalizeFullscreenDelay(source.fullscreenDelay),
     includeFloating: !!source.includeFloating,
+    stickyFullscreen: !!source.stickyFullscreen,
     bins: {
       node: absolutePath(source.nodePath),
       hyprctl: absolutePath(source.hyprctlPath),
@@ -106,7 +120,9 @@ function windowMeta(client) {
     floating: !!client.floating,
     fullscreenMode: internalFullscreen,
     fullscreenClientMode: clientFullscreen,
-    fullscreen: internalFullscreen > 0 || clientFullscreen > 0,
+    // Only the compositor state means the window actually covers the screen;
+    // fullscreenClient is what the app is told and stays set after unfullscreen.
+    fullscreen: internalFullscreen > 0,
     pinned: !!client.pinned,
     mapped: client.mapped !== false,
     monitor: numberOr(client.monitor, -1),
@@ -267,7 +283,7 @@ function minDim(mon, axis) {
   var basis = axis === "x"
     ? (area && area.w > 0 ? area.w : 1920)
     : (area && area.h > 0 ? area.h : 1080)
-  var floor = Math.round(basis / 12.5)
+  var floor = Math.round(basis / 20)
   return floor < MINIMUM_SIZE ? MINIMUM_SIZE : floor
 }
 
@@ -494,7 +510,8 @@ function moveToRootEval() {
 }
 
 function mouseConfigEval(followMouse, refocus) {
-  return 'hl.config({ input = { follow_mouse = ' + Number(followMouse) +
+  var follow = typeof followMouse === "string" ? followMouse : String(Number(followMouse))
+  return 'hl.config({ input = { follow_mouse = ' + follow +
     ', mouse_refocus = ' + (refocus ? 'true' : 'false') + ' } })'
 }
 
@@ -502,7 +519,8 @@ function activeWorkspaceFloatsEval() {
   return 'local function active_workspace_floats() local workspace = hl.get_active_workspace(); if not workspace then return false end; for _, window in ipairs(hl.get_workspace_windows(tostring(workspace.id))) do for _, tag in ipairs(window.tags or {}) do if tag == "omarchy-floating-workspace" then return true end end end; local state_home = os.getenv("XDG_STATE_HOME"); if not state_home or state_home == "" then state_home = (os.getenv("HOME") or "") .. "/.local/state" end; local file = io.open(state_home .. "/omarchy/workspace-layouts/" .. tostring(workspace.id) .. ".lua", "r"); if file then local text = file:read("*a") or ""; file:close(); return text:match([[mode%s*=%s*"floating"]]) ~= nil end; file = io.open(state_home .. "/omarchy/workspace-layouts/default.lua", "r"); if file then local text = file:read("*a") or ""; file:close(); return text:match([[default%s*=%s*"floating"]]) ~= nil end; return false end'
 }
 
-function installHoverBridgeEval() {
+function installHoverBridgeEval(includeFloating) {
+  var appliedFollow = includeFloating ? 1 : '(active_workspace_floats() and 0 or 1)'
   return [
     'local bridge = rawget(_G, "focus_now_hover_bridge") or {}',
     'local function remove(subscription) if subscription then pcall(function() subscription:remove() end) end end',
@@ -511,12 +529,12 @@ function installHoverBridgeEval() {
     'bridge.workspace_subscription = nil; bridge.monitor_subscription = nil; bridge.wrapped_workspace_mode = nil',
     'bridge.workspace_mode = type(o) == "table" and o.workspace_mode or nil',
     activeWorkspaceFloatsEval(),
-    'local function apply_hover_focus() hl.timer(function() bridge.restore_follow_mouse = active_workspace_floats() and 0 or hl.get_config("input.follow_mouse"); bridge.restore_mouse_refocus = hl.get_config("input.mouse_refocus"); ' + mouseConfigEval(1, true) + ' end, { type = "oneshot", timeout = 1 }) end',
+    'local function apply_hover_focus() hl.timer(function() bridge.restore_follow_mouse = active_workspace_floats() and 0 or hl.get_config("input.follow_mouse"); bridge.restore_mouse_refocus = hl.get_config("input.mouse_refocus"); ' + mouseConfigEval(appliedFollow, true) + ' end, { type = "oneshot", timeout = 1 }) end',
     'if bridge.workspace_mode then bridge.wrapped_workspace_mode = function(spec) local result = bridge.workspace_mode(spec); apply_hover_focus(); return result end; o.workspace_mode = bridge.wrapped_workspace_mode end',
     'bridge.workspace_subscription = hl.on("workspace.active", apply_hover_focus)',
     'bridge.monitor_subscription = hl.on("monitor.focused", apply_hover_focus)',
     'rawset(_G, "focus_now_hover_bridge", bridge)',
-    mouseConfigEval(1, true)
+    mouseConfigEval(appliedFollow, true)
   ].join('; ')
 }
 
@@ -626,28 +644,35 @@ function clearManagedFullscreenEval(address, mode) {
   return 'local target = nil; for _, w in ipairs(hl.get_windows()) do ' +
     'if w.address == "' + String(address) + '" then target = w break end end; ' +
     'if target and ' + managedFullscreenCondition(mode) + ' then ' +
-    'hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 0, client = 0, window = target })) end'
+    'hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 0, client = 0, window = "address:" .. target.address })) end'
 }
 
 function clearOtherFullscreenEval(address) {
   return 'local target = nil; for _, w in ipairs(hl.get_windows()) do ' +
     'if w.address == "' + String(address) + '" then target = w break end end; ' +
-    'if target then for _, other in ipairs(hl.get_windows({ workspace = target.workspace })) do ' +
-    'if other.address ~= target.address and (other.fullscreen ~= 0 or other.fullscreen_client ~= 0) then ' +
-    'hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 0, client = 0, window = other })) end ' +
+    'if target then for _, other in ipairs(hl.get_windows()) do ' +
+    'if other.address ~= target.address and other.fullscreen ~= 0 and other.fullscreen_client == 1 then ' +
+    'hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 0, client = 0, window = "address:" .. other.address })) end ' +
     'end end'
+}
+
+function clearAllManagedFullscreenEval() {
+  return 'for _, other in ipairs(hl.get_windows()) do ' +
+    'if other.fullscreen ~= 0 and other.fullscreen_client == 1 then ' +
+    'hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 0, client = 0, window = "address:" .. other.address })) end ' +
+    'end'
 }
 
 function setManagedMaximizedEval(address) {
   return 'local target = nil; for _, w in ipairs(hl.get_windows()) do ' +
     'if w.address == "' + String(address) + '" then target = w break end end; ' +
-    'if target then hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 1, client = 1, window = target })) end'
+    'if target then hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 1, client = 1, window = "address:" .. target.address })) end'
 }
 
 function setManagedFullscreenEval(address) {
   return 'local target = nil; for _, w in ipairs(hl.get_windows()) do ' +
     'if w.address == "' + String(address) + '" then target = w break end end; ' +
-    'if target then hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 2, client = 1, window = target })) end'
+    'if target then hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 2, client = 1, window = "address:" .. target.address })) end'
 }
 
 function clearManagedWindowEval(address, mode) {
@@ -665,6 +690,8 @@ if (typeof module !== "undefined") {
     stepMultiplier: stepMultiplier,
     normalizeHoverDelay: normalizeHoverDelay,
     stepHoverDelay: stepHoverDelay,
+    normalizeFullscreenDelay: normalizeFullscreenDelay,
+    stepFullscreenDelay: stepFullscreenDelay,
     normalizeConfig: normalizeConfig,
     windowMeta: windowMeta,
     parseClients: parseClients,
@@ -704,6 +731,7 @@ if (typeof module !== "undefined") {
     managedFullscreenCondition: managedFullscreenCondition,
     setManagedMaximizedEval: setManagedMaximizedEval,
     clearManagedFullscreenEval: clearManagedFullscreenEval,
+    clearAllManagedFullscreenEval: clearAllManagedFullscreenEval,
     clearManagedWindowEval: clearManagedWindowEval,
     clearOtherFullscreenEval: clearOtherFullscreenEval,
     setManagedFullscreenEval: setManagedFullscreenEval

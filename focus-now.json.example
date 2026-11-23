@@ -5,5 +5,7 @@
   "widthMultiplier": 0.85,
   "heightMultiplier": 0.85,
   "hoverDelay": 120,
-  "includeFloating": false
+  "fullscreenDelay": 5000,
+  "includeFloating": false,
+  "stickyFullscreen": false
 }

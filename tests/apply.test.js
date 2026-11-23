@@ -87,7 +87,7 @@ function fullscreenStates(code) {
   }
   if (/other\\.address ~= target\\.address/.test(code)) {
     for (const client of next.clients) {
-      if (client.address !== target && (client.fullscreen || client.fullscreenClient)) {
+      if (client.address !== target && client.fullscreen && client.fullscreenClient === 1) {
         client.fullscreen = 0
         client.fullscreenClient = 0
       }
@@ -196,8 +196,8 @@ function runApply(fixture, args) {
   }
 }
 
-function applyArgs(fx, focused, managedAddress = "", managedMode = "", mode = "near", includeFloating = false) {
-  return [focused, "0.85", "0.85", includeFloating ? "1" : "0", "1", fx.hyprctl, managedAddress, managedMode, mode]
+function applyArgs(fx, focused, managedAddress = "", managedMode = "", mode = "near", includeFloating = false, sticky = false) {
+  return [focused, "0.85", "0.85", includeFloating ? "1" : "0", "1", fx.hyprctl, managedAddress, managedMode, mode, sticky ? "1" : "0"]
 }
 
 function workspaceState(clients, extra = {}) {
@@ -241,7 +241,8 @@ test("a pop-tagged restored window is skipped until the wrapper finishes", t => 
   const fx = fixture(t, workspaceState([restoring, sibling], { activewindow: restoring }))
   const result = runApply(fx, applyArgs(fx, "restoring", "", "", "near", true))
   assert.deepEqual(JSON.parse(result.stdout), { address: "restoring", managed: "" })
-  assert.equal(result.log, "")
+  assert.match(result.log, /other\.fullscreen_client == 1/)
+  assert.doesNotMatch(result.log, /window\.resize|window\.move|movetoroot/)
   assert.deepEqual(result.state.clients.find(w => w.address === "restoring").size, [500, 760])
 })
 
@@ -329,7 +330,7 @@ test("a tiled window is still treated as alone when floating windows are exclude
   assert.match(result.log, /internal = 1, client = 1/)
 })
 
-test("scrolling layout applies the column share and optional centering", t => {
+test("scrolling layout applies the column share without a redundant center", t => {
   const a = win("a", 0, 40, 500, 760)
   const b = win("b", 500, 40, 500, 760)
   const fx = fixture(t, workspaceState([a, b], {
@@ -338,7 +339,7 @@ test("scrolling layout applies the column share and optional centering", t => {
   const result = runApply(fx, applyArgs(fx, "a"))
   assert.equal(result.stdout, '{"address":"a","managed":""}')
   assert.equal(result.state.colresize, "0.85")
-  assert.equal(result.state.centered, true)
+  assert.equal(result.state.centered, undefined)
 })
 
 test("a special workspace's layout wins over the reported active workspace", t => {
@@ -355,7 +356,7 @@ test("a special workspace's layout wins over the reported active workspace", t =
   const result = runApply(fx, applyArgs(fx, "a"))
   assert.equal(result.stdout, '{"address":"a","managed":""}')
   assert.equal(result.state.colresize, "0.85")
-  assert.equal(result.state.centered, true)
+  assert.equal(result.state.centered, undefined)
 })
 
 test("floating windows are skipped when includeFloating is off", t => {
@@ -363,7 +364,8 @@ test("floating windows are skipped when includeFloating is off", t => {
   const fx = fixture(t, workspaceState([a], { cursor: { x: 150, y: 150 } }))
   const result = runApply(fx, applyArgs(fx, "a", "", "", "near", false))
   assert.equal(result.stdout, '{"address":"a","managed":""}')
-  assert.equal(result.log, "")
+  assert.match(result.log, /other\.fullscreen_client == 1/)
+  assert.doesNotMatch(result.log, /window\.resize|window\.move|movetoroot/)
 })
 
 test("hovered floating windows expand, move into the work area, and raise", t => {
@@ -417,7 +419,8 @@ test("a skipped floating reapply preserves its saved original rectangle", t => {
     true
   ))
   assert.equal(result.stdout, '{"address":"a","managed":"floating:100:100:200:100"}')
-  assert.equal(result.log, "")
+  assert.match(result.log, /other\.fullscreen_client == 1/)
+  assert.doesNotMatch(result.log, /window\.resize|window\.move|movetoroot/)
 })
 
 test("a floating window expands when the pointer enters during the hover grace", t => {
@@ -444,6 +447,66 @@ test("fullscreen mode clears other fullscreen windows but keeps the target manag
   assert.equal(result.state.clients[0].fullscreenClient, 1)
   assert.equal(result.state.clients[1].fullscreen, 0)
   assert.equal(result.state.clients[1].fullscreenClient, 0)
+})
+
+test("sticky fullscreen keeps the previous managed fullscreen window", t => {
+  const a = win("a", 0, 40, 500, 760, { fullscreen: 2, fullscreenClient: 1 })
+  const b = win("b", 500, 40, 500, 760)
+  const fx = fixture(t, workspaceState([a, b], { activewindow: b }))
+  const result = runApply(fx, applyArgs(fx, "b", "a", "fullscreen", "fullscreen", false, true))
+  assert.equal(result.stdout, '{"address":"b","managed":"fullscreen"}')
+  assert.doesNotMatch(result.log, /other\.address ~= target\.address/)
+  assert.doesNotMatch(result.log, /target\.fullscreen == 2 and target\.fullscreen_client == 1/)
+  assert.equal(result.state.clients[0].fullscreen, 2)
+  assert.equal(result.state.clients[0].fullscreenClient, 1)
+  assert.equal(result.state.clients[1].fullscreen, 2)
+  assert.equal(result.state.clients[1].fullscreenClient, 1)
+})
+
+test("non-sticky fullscreen clears the previous managed fullscreen window", t => {
+  const a = win("a", 0, 40, 500, 760, { fullscreen: 2, fullscreenClient: 1 })
+  const b = win("b", 500, 40, 500, 760)
+  const fx = fixture(t, workspaceState([a, b], { activewindow: b }))
+  const result = runApply(fx, applyArgs(fx, "b", "a", "fullscreen", "fullscreen"))
+  assert.equal(result.stdout, '{"address":"b","managed":"fullscreen"}')
+  assert.match(result.log, /target\.fullscreen == 2 and target\.fullscreen_client == 1/)
+  assert.equal(result.state.clients[0].fullscreen, 0)
+  assert.equal(result.state.clients[0].fullscreenClient, 0)
+  assert.equal(result.state.clients[1].fullscreen, 2)
+  assert.equal(result.state.clients[1].fullscreenClient, 1)
+})
+
+test("sticky fullscreen preserves user-owned fullscreen windows", t => {
+  const a = win("a", 0, 40, 500, 760, { fullscreen: 2, fullscreenClient: 2 })
+  const b = win("b", 500, 40, 500, 760)
+  const fx = fixture(t, workspaceState([a, b], { activewindow: b }))
+  const result = runApply(fx, applyArgs(fx, "b", "", "", "fullscreen", false, true))
+  assert.equal(result.stdout, '{"address":"b","managed":"fullscreen"}')
+  assert.equal(result.state.clients[0].fullscreen, 2)
+  assert.equal(result.state.clients[0].fullscreenClient, 2)
+  assert.equal(result.state.clients[1].fullscreen, 2)
+})
+
+test("sticky fullscreen does not preserve managed fullscreen in near mode", t => {
+  const a = win("a", 0, 40, 500, 760, { fullscreen: 2, fullscreenClient: 1 })
+  const b = win("b", 500, 40, 500, 760)
+  const fx = fixture(t, workspaceState([a, b], { activewindow: b }))
+  const result = runApply(fx, applyArgs(fx, "b", "a", "fullscreen", "near", false, true))
+  assert.match(result.log, /target\.fullscreen == 2 and target\.fullscreen_client == 1/)
+  assert.equal(result.state.clients[0].fullscreen, 0)
+  assert.equal(result.state.clients[0].fullscreenClient, 0)
+})
+
+test("refocusing a sticky fullscreen window re-tracks it as managed", t => {
+  const a = win("a", 0, 40, 500, 760, { fullscreen: 2, fullscreenClient: 1 })
+  const b = win("b", 500, 40, 500, 760, { fullscreen: 2, fullscreenClient: 1 })
+  const fx = fixture(t, workspaceState([a, b], { activewindow: a }))
+  const result = runApply(fx, applyArgs(fx, "a", "b", "fullscreen", "fullscreen", false, true))
+  assert.equal(result.stdout, '{"address":"a","managed":"fullscreen"}')
+  assert.equal(result.state.clients[0].fullscreen, 2)
+  assert.equal(result.state.clients[0].fullscreenClient, 1)
+  assert.equal(result.state.clients[1].fullscreen, 2)
+  assert.equal(result.state.clients[1].fullscreenClient, 1)
 })
 
 test("a repeated nested layout falls back to movetoroot only once", t => {

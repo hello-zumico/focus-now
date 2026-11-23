@@ -26,14 +26,14 @@ Panel {
     if (!service || !cfg.enabled) return strings.t("status.off")
     if (cfg.expandMode === "fullscreen") return strings.t("status.fullscreen")
     if (cfg.expandMode === "near") return strings.t("status.near").arg(percent(cfg.widthMultiplier)).arg(percent(cfg.heightMultiplier))
-    if (cfg.hoverFocus) return strings.t("status.hover")
-    return strings.t("status.off")
+    return strings.t("status.expansionOff")
   }
 
   function setExpansion(mode, checked) {
     if (!root.service) return
     if (checked) root.service.setMode(mode)
-    else if (root.cfg.expandMode === mode) root.service.setMode("off")
+    else if (root.cfg.expandMode === mode)
+      root.service.setMode(mode === "fullscreen" ? "near" : "off")
   }
 
   BarIconButton {
@@ -111,6 +111,14 @@ Panel {
               wrapMode: Text.WordWrap
               width: parent.width
             }
+            PlainText {
+              visible: root.enabled && root.cfg.expandMode === "off"
+              width: parent.width
+              text: strings.t("hint.expansionOff")
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
           }
 
           ToggleSwitch {
@@ -130,17 +138,77 @@ Panel {
           spacing: Style.space(10)
 
           PanelSectionHeader {
-            text: strings.t("section.behavior").toUpperCase()
+            text: strings.t("section.behavior")
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
           }
 
-          ToggleRow {
-            label: strings.t("behavior.hover")
-            hint: strings.t("behavior.hover.hint")
-            checked: root.cfg.hoverFocus
-            onSwitched: if (root.service) root.service.setHoverFocus(!root.cfg.hoverFocus)
+          StepperRow {
+            label: strings.t("row.hoverDelay")
+            hint: strings.t("row.hoverDelay.hint")
+            value: root.cfg.hoverDelay + " ms"
+            onDecrease: if (root.service) root.service.stepHoverDelay(-1)
+            onIncrease: if (root.service) root.service.stepHoverDelay(1)
           }
+        }
+
+        PanelSeparator {
+          foreground: root.bar.foreground
+        }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(10)
+
+          ToggleRow {
+            label: strings.t("behavior.near")
+            hint: strings.t("behavior.near.hint")
+            checked: root.cfg.expandMode === "near"
+            onSwitched: root.setExpansion("near", !checked)
+          }
+
+          Column {
+            visible: root.cfg.expandMode === "near"
+            width: parent.width
+            spacing: Style.space(10)
+
+            PanelSectionHeader {
+              text: strings.t("section.multipliers")
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            StepperRow {
+              label: strings.t("row.width")
+              hint: strings.t("row.width.hint")
+              value: root.percent(root.cfg.widthMultiplier)
+              onDecrease: if (root.service) root.service.stepWidth(-1)
+              onIncrease: if (root.service) root.service.stepWidth(1)
+            }
+
+            StepperRow {
+              label: strings.t("row.height")
+              hint: strings.t("row.height.hint")
+              value: root.percent(root.cfg.heightMultiplier)
+              onDecrease: if (root.service) root.service.stepHeight(-1)
+              onIncrease: if (root.service) root.service.stepHeight(1)
+            }
+
+            Label {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: strings.t("hint.multipliers")
+            }
+          }
+        }
+
+        PanelSeparator {
+          foreground: root.bar.foreground
+        }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(10)
 
           ToggleRow {
             label: strings.t("behavior.fullscreen")
@@ -150,54 +218,20 @@ Panel {
           }
 
           ToggleRow {
-            label: strings.t("behavior.near")
-            hint: strings.t("behavior.near.hint")
-            checked: root.cfg.expandMode === "near"
-            onSwitched: root.setExpansion("near", !checked)
+            visible: root.cfg.expandMode === "fullscreen"
+            label: strings.t("behavior.sticky")
+            hint: strings.t("behavior.sticky.hint")
+            checked: root.cfg.stickyFullscreen
+            onSwitched: if (root.service) root.service.setStickyFullscreen(!root.cfg.stickyFullscreen)
           }
 
           StepperRow {
-            label: strings.t("row.hoverDelay")
-            value: root.cfg.hoverDelay + " ms"
-            onDecrease: if (root.service) root.service.stepHoverDelay(-1)
-            onIncrease: if (root.service) root.service.stepHoverDelay(1)
-          }
-        }
-
-        PanelSeparator {
-          visible: root.cfg.expandMode === "near"
-          foreground: root.bar.foreground
-        }
-
-        Column {
-          visible: root.cfg.expandMode === "near"
-          width: parent.width
-          spacing: Style.space(10)
-
-          PanelSectionHeader {
-            text: strings.t("section.multipliers").toUpperCase()
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-          }
-
-          StepperRow {
-            label: strings.t("row.width")
-            value: root.percent(root.cfg.widthMultiplier)
-            onDecrease: if (root.service) root.service.stepWidth(-1)
-            onIncrease: if (root.service) root.service.stepWidth(1)
-          }
-
-          StepperRow {
-            label: strings.t("row.height")
-            value: root.percent(root.cfg.heightMultiplier)
-            onDecrease: if (root.service) root.service.stepHeight(-1)
-            onIncrease: if (root.service) root.service.stepHeight(1)
-          }
-
-          Label {
-            width: parent.width
-            wrapMode: Text.WordWrap
-            text: strings.t("hint.noNeighbors")
+            visible: root.cfg.expandMode === "fullscreen"
+            label: strings.t("row.fullscreenDelay")
+            hint: strings.t("row.fullscreenDelay.hint")
+            value: root.cfg.fullscreenDelay + " ms"
+            onDecrease: if (root.service) root.service.stepFullscreenDelay(-1)
+            onIncrease: if (root.service) root.service.stepFullscreenDelay(1)
           }
         }
       }
@@ -251,17 +285,23 @@ Panel {
     id: stepper
     property string label: ""
     property string value: ""
+    property string hint: ""
     signal decrease()
     signal increase()
 
     width: parent ? parent.width : 0
-    implicitHeight: Math.max(stepLabel.implicitHeight, plus.implicitHeight)
+    implicitHeight: Math.max(labels.implicitHeight, plus.implicitHeight)
 
-    Label {
-      id: stepLabel
+    Column {
+      id: labels
       anchors.left: parent.left
+      anchors.right: minus.left
+      anchors.rightMargin: Style.space(10)
       anchors.verticalCenter: parent.verticalCenter
-      text: stepper.label
+      spacing: Style.space(2)
+
+      PlainText { width: parent.width; text: stepper.label; elide: Text.ElideRight }
+      Label { width: parent.width; text: stepper.hint; wrapMode: Text.WordWrap; visible: stepper.hint !== "" }
     }
     Button {
       id: plus
@@ -285,6 +325,7 @@ Panel {
       text: stepper.value
     }
     Button {
+      id: minus
       anchors.right: plus.left
       anchors.rightMargin: Style.space(82)
       anchors.verticalCenter: parent.verticalCenter

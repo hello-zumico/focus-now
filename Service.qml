@@ -42,6 +42,10 @@ Item {
   property bool stateBridgeInstalled: false
   property string managedAddress: ""
   property string managedMode: ""
+  property var managedFullscreenAddrs: ({})
+  property var fullscreenStates: ({})
+  property double expandHoldUntil: 0
+  property string heldAddress: ""
   property string hoverMonitorAddress: ""
   property int savedFollowMouse: -1
   property bool savedMouseRefocus: true
@@ -82,12 +86,15 @@ Item {
       widthMultiplier: normalized.widthMultiplier,
       heightMultiplier: normalized.heightMultiplier,
       hoverDelay: normalized.hoverDelay,
-      includeFloating: normalized.includeFloating
+      fullscreenDelay: normalized.fullscreenDelay,
+      includeFloating: normalized.includeFloating,
+      stickyFullscreen: normalized.stickyFullscreen
     }, null, 2) + "\n")
   }
 
   function setEnabled(value) { saveConfig({ enabled: !!value }) }
   function setHoverFocus(value) { saveConfig({ hoverFocus: !!value }) }
+  function setStickyFullscreen(value) { saveConfig({ stickyFullscreen: !!value }) }
   function setMode(mode) {
     if (Model.EXPAND_MODES.indexOf(mode) < 0) mode = "off"
     saveConfig({ expandMode: mode })
@@ -98,6 +105,8 @@ Item {
   function stepHeight(direction) { saveConfig({ heightMultiplier: Model.stepMultiplier(config.heightMultiplier, direction) }) }
   function setHoverDelay(value) { saveConfig({ hoverDelay: Model.normalizeHoverDelay(value) }) }
   function stepHoverDelay(direction) { saveConfig({ hoverDelay: Model.stepHoverDelay(config.hoverDelay, direction) }) }
+  function setFullscreenDelay(value) { saveConfig({ fullscreenDelay: Model.normalizeFullscreenDelay(value) }) }
+  function stepFullscreenDelay(direction) { saveConfig({ fullscreenDelay: Model.stepFullscreenDelay(config.fullscreenDelay, direction) }) }
 
   function nodeCandidates() {
     return [
@@ -163,7 +172,7 @@ Item {
     if (!root.ipcOwner) return
     root.hoverBridgeInstalled = true
     hoverBridgeProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
-      Model.installHoverBridgeEval()]
+      Model.installHoverBridgeEval(config.includeFloating)]
     hoverBridgeProc.running = false
     hoverBridgeProc.running = true
   }
@@ -183,8 +192,7 @@ Item {
       captureMouseProc.running = true
       return
     }
-    if (config.includeFloating) installHoverBridge()
-    else uninstallHoverBridge()
+    installHoverBridge()
   }
 
   function releaseHoverFocus() {
@@ -222,15 +230,15 @@ Item {
 
   function clearManagedWindow(detached) {
     root.stopFloatingHoverMonitor()
-    if (!root.managedAddress || !root.managedMode) {
-      root.managedAddress = ""
-      root.managedMode = ""
-      return
-    }
-    cleanupProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
-      Model.clearManagedWindowEval(root.managedAddress, root.managedMode)]
+    var evalSource = root.managedAddress && root.managedMode
+      ? Model.clearManagedWindowEval(root.managedAddress, root.managedMode) + "; "
+      : ""
+    evalSource += Model.clearAllManagedFullscreenEval()
+    cleanupProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval", evalSource]
     root.managedAddress = ""
     root.managedMode = ""
+    root.managedFullscreenAddrs = ({})
+    root.heldAddress = ""
     if (detached) cleanupProc.startDetached()
     else {
       cleanupProc.running = false
@@ -243,6 +251,10 @@ Item {
     if (!config.hoverFocus && config.expandMode === "off") return
     address = hyprAddress(address)
     if (!address) return
+    if (Date.now() < root.expandHoldUntil) {
+      root.heldAddress = address
+      return
+    }
     root.pendingAddress = address
     debounce.restart()
   }
@@ -256,6 +268,11 @@ Item {
 
   function startAction() {
     if (!root.ipcOwner) return
+    if (Date.now() < root.expandHoldUntil) {
+      if (root.pendingAddress) root.heldAddress = root.pendingAddress
+      root.pendingAddress = ""
+      return
+    }
     var address = root.pendingAddress
     if (!address || address === "") return
     root.lastHandledAddress = address
@@ -279,7 +296,8 @@ Item {
         root.hyprctlBinary,
         priorManagedAddress,
         priorManagedMode,
-        config.expandMode
+        config.expandMode,
+        config.stickyFullscreen ? "1" : "0"
       ]
       actionProc.running = false
       actionProc.running = true
@@ -302,7 +320,9 @@ Item {
       widthMultiplier: config.widthMultiplier,
       heightMultiplier: config.heightMultiplier,
       hoverDelay: config.hoverDelay,
+      fullscreenDelay: config.fullscreenDelay,
       includeFloating: config.includeFloating,
+      stickyFullscreen: config.stickyFullscreen,
       active: lastHandledAddress,
       pending: pendingAddress,
       managed: managedAddress,
@@ -372,6 +392,61 @@ Item {
     }
   }
 
+  Timer {
+    id: holdReleaseTimer
+    interval: 250
+    repeat: true
+    running: root.heldAddress !== ""
+    onTriggered: {
+      if (!root.heldAddress || Date.now() < root.expandHoldUntil) return
+      var address = root.heldAddress
+      root.heldAddress = ""
+      root.requestRefresh(address)
+    }
+  }
+
+  Timer {
+    id: fullscreenReleaseDebounce
+    interval: 120
+    repeat: false
+    onTriggered: {
+      fullscreenReleaseProc.running = false
+      fullscreenReleaseProc.running = true
+    }
+  }
+
+  Process {
+    id: fullscreenReleaseProc
+    command: [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "-j", "clients"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (!root || root.destroyed || !root.ipcOwner) return
+        var clients = Model.parseClients(text)
+        var next = {}
+        for (var address in clients) {
+          var win = clients[address]
+          var previous = root.fullscreenStates[address] || 0
+          var current = win.fullscreenMode || 0
+          // A managed window leaving fullscreen keeps fullscreenClient == 1;
+          // Focus Now's own clears set client = 0, so only a user toggle lands
+          // here. Require tracked managed state: compositor churn on sticky
+          // orphans and lingering client flags must not arm the hold.
+          var wasManaged = root.managedFullscreenAddrs[address] === true
+          if (wasManaged && previous !== 0 && current === 0 && (win.fullscreenClientMode || 0) === 1) {
+            root.managedFullscreenAddrs[address] = false
+            root.expandHoldUntil = Date.now() + root.config.fullscreenDelay
+            root.log("managed fullscreen released by user; expansion held")
+          } else if (wasManaged && current === 0 && (win.fullscreenClientMode || 0) === 0) {
+            root.managedFullscreenAddrs[address] = false
+          }
+          next[address] = current
+        }
+        root.fullscreenStates = next
+      }
+    }
+  }
+
   Process {
     id: ipcLockProc
     command: ["/usr/bin/mkdir", root.serviceLockPath]
@@ -391,6 +466,11 @@ Item {
         if (result && result.address) {
           root.managedAddress = result.managed ? String(result.address) : ""
           root.managedMode = String(result.managed || "")
+          if (result.managed === "fullscreen" || result.managed === "maximized") {
+            var tracked = root.managedFullscreenAddrs
+            tracked[String(result.address)] = true
+            root.managedFullscreenAddrs = tracked
+          }
           root.startFloatingHoverMonitor()
         }
       }
@@ -464,7 +544,7 @@ Item {
         if (isFinite(savedFollow)) root.savedFollowMouse = savedFollow
         if (refocus && typeof refocus.bool === "boolean") root.savedMouseRefocus = refocus.bool
         root.hoverHeld = true
-        if (root.config.includeFloating) root.installHoverBridge()
+        root.installHoverBridge()
       }
     }
     onExited: function(code) {
@@ -502,6 +582,10 @@ Item {
         data = []
       }
       var address = data.length ? String(data[0] || "") : ""
+      if (eventName === "fullscreen") {
+        if (root.ipcOwner) fullscreenReleaseDebounce.restart()
+        return
+      }
       if (eventName === "changefloatingmode") {
         if (address) root.requestRefresh(address)
         else snapshotProbe.running = true
@@ -577,6 +661,9 @@ Item {
     function hoverOff(): string { root.setHoverFocus(false); return "off" }
     function hoverToggle(): string { root.setHoverFocus(!root.config.hoverFocus); return root.config.hoverFocus ? "on" : "off" }
     function fullscreen(): string { root.setMode("fullscreen"); return "fullscreen" }
+    function stickyOn(): string { root.setStickyFullscreen(true); return "on" }
+    function stickyOff(): string { root.setStickyFullscreen(false); return "off" }
+    function stickyToggle(): string { root.setStickyFullscreen(!root.config.stickyFullscreen); return root.config.stickyFullscreen ? "on" : "off" }
     function near(): string { root.setMode("near"); return "near" }
     function noExpand(): string { root.setMode("off"); return "off" }
     function width(value: string): string { root.setWidthMultiplier(Number(value)); return String(root.config.widthMultiplier) }
@@ -588,6 +675,9 @@ Item {
     function hoverDelay(value: string): string { root.setHoverDelay(Number(value)); return String(root.config.hoverDelay) }
     function hoverDelayUp(): string { root.stepHoverDelay(1); return String(root.config.hoverDelay) }
     function hoverDelayDown(): string { root.stepHoverDelay(-1); return String(root.config.hoverDelay) }
+    function fullscreenDelay(value: string): string { root.setFullscreenDelay(Number(value)); return String(root.config.fullscreenDelay) }
+    function fullscreenDelayUp(): string { root.stepFullscreenDelay(1); return String(root.config.fullscreenDelay) }
+    function fullscreenDelayDown(): string { root.stepFullscreenDelay(-1); return String(root.config.fullscreenDelay) }
     function refresh(): string {
       if (root.lastHandledAddress) root.requestRefresh(root.lastHandledAddress)
       else snapshotProbe.running = true

@@ -94,9 +94,11 @@ test("all public IPC controls map to normalized service settings", () => {
   for (const method of [
     "status", "ping", "enable", "disable", "toggle",
     "hoverOn", "hoverOff", "hoverToggle",
-    "fullscreen", "near", "noExpand",
+    "fullscreen", "stickyOn", "stickyOff", "stickyToggle", "near", "noExpand",
     "width", "height", "widthUp", "widthDown",
-    "heightUp", "heightDown", "refresh"
+    "heightUp", "heightDown", "refresh",
+    "hoverDelay", "hoverDelayUp", "hoverDelayDown",
+    "fullscreenDelay", "fullscreenDelayUp", "fullscreenDelayDown"
   ]) {
     assert.match(ipc, new RegExp(`function ${method}\\(`))
   }

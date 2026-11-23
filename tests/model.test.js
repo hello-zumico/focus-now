@@ -41,10 +41,12 @@ function clientMap(...windows) {
 test("normalizes and steps multiplier selectors", () => {
   const normalized = M.normalizeConfig({ widthMultiplier: 0.84, heightMultiplier: 2, expandMode: "bad" })
   assert.equal(normalized.widthMultiplier, 0.85)
-  assert.equal(normalized.heightMultiplier, 1.0)
+  assert.equal(normalized.heightMultiplier, 0.95)
   assert.equal(normalized.expandMode, "near")
   assert.equal(M.stepMultiplier(0.85, 1), 0.9)
-  assert.equal(M.stepMultiplier(0.5, -1), 0.5)
+  assert.equal(M.stepMultiplier(0.5, -1), 0.4)
+  assert.equal(M.stepMultiplier(0.25, -1), 0.25)
+  assert.equal(M.nearestMultiplier(0.3, 0.85), 0.33)
 })
 
 test("side-by-side focus gets multiplier and neighbors share remainder", () => {
@@ -123,10 +125,10 @@ test("every unfocused strip is held to its minimum width", () => {
   const bottomRight = win("bottom-right", 1401, 146, 123, 680)
   const clients = clientMap(focused, left, topRight, bottomRight)
   const targets = M.layoutTargets(clients.focused, clients, scaled, { ...cfg, widthMultiplier: 0.85 })
-  assert.equal(targets.focused.w, 1238)
-  assert.equal(targets.left.w, 123)
-  assert.equal(targets["top-right"].w, 123)
-  assert.equal(targets["bottom-right"].w, 123)
+  assert.equal(targets.focused.w, 1261)
+  assert.equal(targets.left.w, 136)
+  assert.equal(targets["top-right"].w, 87)
+  assert.equal(targets["bottom-right"].w, 87)
   const plan = M.layoutOps(clients.focused, clients, scaled, { ...cfg, widthMultiplier: 0.85 })
   assert.ok(plan.ops.some(op => op.address === "focused" && op.dx < 0 && op.candidate === 0))
   assert.ok(plan.ops.some(op => op.address === "left" && op.dx < 0 && op.candidate > 0))
@@ -255,7 +257,7 @@ test("nested splits can promote the focused window to the root", () => {
 })
 
 test("hover bridge handles floating-mode input changes without polling", () => {
-  const install = M.installHoverBridgeEval()
+  const install = M.installHoverBridgeEval(true)
   assert.match(install, /o\.workspace_mode = bridge\.wrapped_workspace_mode/)
   assert.match(install, /hl\.on\("workspace\.active"/)
   assert.match(install, /hl\.on\("monitor\.focused"/)
@@ -270,6 +272,10 @@ test("hover bridge handles floating-mode input changes without polling", () => {
   assert.match(uninstall, /elseif active_workspace_floats\(\) then restore_follow = 0/)
   assert.match(uninstall, /restore_refocus = false/)
   assert.match(uninstall, /restore_mouse_refocus ~= nil/)
+
+  const tiledOnly = M.installHoverBridgeEval(false)
+  assert.match(tiledOnly, /follow_mouse = \(active_workspace_floats\(\) and 0 or 1\)/)
+  assert.doesNotMatch(tiledOnly, /follow_mouse = 1,/)
 })
 
 test("state bridge refreshes only when the active window changes floating state", () => {

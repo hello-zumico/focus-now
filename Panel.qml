@@ -29,6 +29,14 @@ Panel {
     return strings.t("status.expansionOff")
   }
 
+  // Nerd Font glyph per expansion mode; the disabled state is carried by
+  // dimming, not a different glyph.
+  readonly property string modeGlyph: {
+    if (cfg.expandMode === "fullscreen") return "󰊓"
+    if (cfg.expandMode === "near") return "󰋱"
+    return "󰋲"
+  }
+
   function setExpansion(mode, checked) {
     if (!root.service) return
     if (checked) root.service.setMode(mode)
@@ -40,7 +48,8 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.enabled ? "󰍉" : "󰍎"
+    text: root.modeGlyph
+    dimmed: !root.enabled
     tooltipText: root.enabled ? strings.t("bar.tooltipOn") : strings.t("bar.tooltipOff")
     onPressed: function(b) {
       if (b === Qt.RightButton) { if (root.service) root.service.setEnabled(!root.enabled) }
@@ -80,7 +89,8 @@ Panel {
 
           PlainText {
             id: heroIcon
-            text: root.enabled ? "󰍉" : "󰍎"
+            text: root.modeGlyph
+            opacity: root.enabled ? 1.0 : 0.45
             font.pixelSize: Style.font.display
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter

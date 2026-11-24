@@ -572,6 +572,39 @@ test("a managed window on the same workspace is still cleared", t => {
   assert.equal(result.state.clients[0].fullscreenClient, 0)
 })
 
+test("a cross-workspace apply stays silent so managed tracking survives", t => {
+  const a = win("a", 0, 40, 500, 760, { fullscreen: 1, fullscreenClient: 1 })
+  const b = win("b", 0, 40, 500, 760, { workspace: { id: 2, name: "2" } })
+  const fx = fixture(t, workspaceState([a, b], {
+    activewindow: b,
+    activeworkspace: { id: 2, name: "2" }
+  }))
+  const result = runApply(fx, applyArgs(fx, "b", "a", "maximized", "near"))
+  assert.equal(result.stdout, "")
+  assert.equal(result.state.clients[0].fullscreen, 1)
+  assert.equal(result.state.clients[0].fullscreenClient, 1)
+  assert.equal(result.state.clients[1].fullscreen, 1)
+  assert.equal(result.state.clients[1].fullscreenClient, 1)
+})
+
+test("a cross-workspace multi-window apply also stays silent", t => {
+  const a = win("a", 0, 40, 500, 760, { fullscreen: 1, fullscreenClient: 1 })
+  const scratch = { id: -98, name: "special:scratchpad" }
+  const b = win("b", 0, 40, 400, 760, { workspace: scratch })
+  const c = win("c", 400, 40, 400, 760, { workspace: scratch })
+  const fx = fixture(t, workspaceState([a, b, c], {
+    activewindow: b,
+    workspaces: [
+      { id: 1, name: "1", tiledLayout: "dwindle" },
+      { id: -98, name: "special:scratchpad", tiledLayout: "dwindle" }
+    ]
+  }))
+  const result = runApply(fx, applyArgs(fx, "b", "a", "maximized", "near"))
+  assert.equal(result.stdout, "")
+  assert.equal(result.state.clients[0].fullscreen, 1)
+  assert.equal(result.state.clients[0].fullscreenClient, 1)
+})
+
 test("a repeated nested layout falls back to movetoroot only once", t => {
   const a = win("a", 0, 40, 500, 760)
   const b = win("b", 500, 40, 500, 760)

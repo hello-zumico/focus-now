@@ -65,6 +65,11 @@ function layoutName(clients) {
 }
 
 function emit(mode) {
+  // A managed window can hold fullscreen state on its own workspace while an
+  // apply runs elsewhere. Emitting here would overwrite the service's single
+  // managed-address slot and orphan that window's tracking, so cross-workspace
+  // applies stay silent and leave the tracked state untouched.
+  if (foreignManaged) return
   process.stdout.write(JSON.stringify({ address: requestedAddress, managed: String(mode || "") }) + "\n")
 }
 
@@ -167,6 +172,7 @@ function workspaceFingerprint(clients) {
 }
 
 let rootPromotionUsed = false
+let foreignManaged = false
 function promoteToRoot() {
   if (rootPromotionUsed || active() !== requestedAddress) return false
   const clients = snapshot()
@@ -217,6 +223,7 @@ try {
   if (targetWindow && String(targetWindow.cls || "").indexOf("omarchy.screensaver") !== -1) process.exit(0)
   const sameWorkspace = !!(previousWindow && targetWindow &&
     String(previousWindow.workspaceId) === String(targetWindow.workspaceId))
+  foreignManaged = !!(previousWindow && !sameWorkspace)
   if (sameWorkspace) restorePreviousFloating(expandMode !== "near" || !includeFloating)
   if (sameWorkspace && !(stickyFullscreen && expandMode === "fullscreen") &&
       previousAddress && previousAddress !== requestedAddress &&

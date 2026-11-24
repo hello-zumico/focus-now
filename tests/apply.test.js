@@ -366,6 +366,27 @@ test("a special workspace's layout wins over the reported active workspace", t =
   assert.equal(result.state.centered, undefined)
 })
 
+test("the screensaver overlay exits without emitting or touching managed state", t => {
+  const saver = win("saver", 0, 0, 1000, 800, {
+    class: "org.omarchy.screensaver",
+    workspace: { id: -97, name: "special:screensaver-eDP-1" }
+  })
+  const managed = win("managed", 0, 0, 1000, 760, { fullscreen: 1, fullscreenClient: 1 })
+  const fx = fixture(t, workspaceState([saver, managed], {
+    activewindow: saver,
+    workspaces: [
+      { id: 1, name: "1", tiledLayout: "dwindle" },
+      { id: -97, name: "special:screensaver-eDP-1", tiledLayout: "dwindle" }
+    ]
+  }))
+  const result = runApply(fx, applyArgs(fx, "saver", "managed", "maximized", "near"))
+  assert.equal(result.stdout, "")
+  assert.equal(result.log, "")
+  const kept = result.state.clients.find(w => w.address === "managed")
+  assert.equal(kept.fullscreen, 1)
+  assert.equal(kept.fullscreenClient, 1)
+})
+
 test("floating windows are skipped when includeFloating is off", t => {
   const a = win("a", 100, 100, 200, 100, { floating: true })
   const fx = fixture(t, workspaceState([a], { cursor: { x: 150, y: 150 } }))

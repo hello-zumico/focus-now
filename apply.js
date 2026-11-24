@@ -211,6 +211,10 @@ try {
   const initial = snapshot()
   const previousWindow = previousAddress ? initial[previousAddress] : null
   const targetWindow = initial[requestedAddress]
+  // The Omarchy screensaver is a transient overlay that steals focus on a
+  // special workspace. Letting it emit managed state would orphan the real
+  // managed window's tracking, so skip it without emitting.
+  if (targetWindow && String(targetWindow.cls || "").indexOf("omarchy.screensaver") !== -1) process.exit(0)
   const sameWorkspace = !!(previousWindow && targetWindow &&
     String(previousWindow.workspaceId) === String(targetWindow.workspaceId))
   if (sameWorkspace) restorePreviousFloating(expandMode !== "near" || !includeFloating)

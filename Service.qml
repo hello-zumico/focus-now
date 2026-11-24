@@ -337,6 +337,11 @@ Item {
       hoverBridge: hoverBridgeInstalled,
       stateBridge: stateBridgeInstalled,
       hoverMonitor: floatingHoverMonitor.running,
+      ipcOwner: ipcOwner,
+      holdUntil: Math.max(0, root.expandHoldUntil - Date.now()),
+      held: heldAddress,
+      fsStates: fullscreenStates,
+      managedFs: managedFullscreenAddrs,
       node: binNode
     })
   }
@@ -428,10 +433,12 @@ Item {
         if (!root || root.destroyed || !root.ipcOwner) return
         var clients = Model.parseClients(text)
         var next = {}
+        var exited = false
         for (var address in clients) {
           var win = clients[address]
           var previous = root.fullscreenStates[address] || 0
           var current = win.fullscreenMode || 0
+          if (previous !== 0 && current === 0) exited = true
           // A managed window leaving fullscreen keeps fullscreenClient == 1;
           // Focus Now's own clears set client = 0, so only a user toggle lands
           // here. Require tracked managed state: compositor churn on sticky
@@ -447,6 +454,11 @@ Item {
           next[address] = current
         }
         root.fullscreenStates = next
+        // Leaving fullscreen keeps the same window focused, so no activewindow
+        // event fires and the shrunken window is never re-expanded. Probe the
+        // active window; for a managed release the hold just armed above makes
+        // requestRefresh park it until the delay is over.
+        if (exited) snapshotProbe.running = true
       }
     }
   }
@@ -457,8 +469,27 @@ Item {
     onExited: function(code) {
       if (!root || root.destroyed) return
       if (code === 0) root.becomeIpcOwner()
+      else ipcLockRetry.restart()
     }
   }
+
+  // The previous instance's rmdir is detached and can land after this mkdir;
+  // losing that race leaves the service without an IPC target or any events
+  // until the next reload. A real second owner keeps failing the same way, so
+  // give up after a few seconds.
+  Timer {
+    id: ipcLockRetry
+    interval: 400
+    repeat: true
+    onTriggered: {
+      if (root.destroyed || root.ipcOwner) { running = false; return }
+      ipcLockRetries += 1
+      if (ipcLockRetries > 15) { running = false; return }
+      ipcLockProc.running = false
+      ipcLockProc.running = true
+    }
+  }
+  property int ipcLockRetries: 0
 
   Process {
     id: actionProc

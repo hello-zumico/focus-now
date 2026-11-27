@@ -168,6 +168,22 @@ Panel {
             checked: root.cfg.mouseRefocus
             onSwitched: if (root.service) root.service.setMouseRefocus(!root.cfg.mouseRefocus)
           }
+
+          ToggleRow {
+            label: strings.t("behavior.animate")
+            hint: strings.t("behavior.animate.hint")
+            checked: root.cfg.animate
+            onSwitched: if (root.service) root.service.setAnimate(!root.cfg.animate)
+          }
+
+          StepperRow {
+            visible: root.cfg.animate
+            label: strings.t("row.animateSpeed")
+            hint: strings.t("row.animateSpeed.hint")
+            value: root.cfg.animateSpeed > 0 ? root.cfg.animateSpeed + " ms" : strings.t("value.default")
+            onDecrease: if (root.service) root.service.stepAnimateSpeed(-1)
+            onIncrease: if (root.service) root.service.stepAnimateSpeed(1)
+          }
         }
 
         PanelSeparator {
@@ -210,6 +226,14 @@ Panel {
               value: root.percent(root.cfg.heightMultiplier)
               onDecrease: if (root.service) root.service.stepHeight(-1)
               onIncrease: if (root.service) root.service.stepHeight(1)
+            }
+
+            StepperRow {
+              label: strings.t("row.collapseSize")
+              hint: strings.t("row.collapseSize.hint")
+              value: root.cfg.collapseSize + " px"
+              onDecrease: if (root.service) root.service.stepCollapseSize(-1)
+              onIncrease: if (root.service) root.service.stepCollapseSize(1)
             }
 
             Label {

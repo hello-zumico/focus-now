@@ -37,10 +37,17 @@ test("config normalization covers every supported option", () => {
     expandMode: "fullscreen",
     widthMultiplier: 0.86,
     heightMultiplier: "bad",
+    collapseSize: "74.6",
     hoverDelay: "250.6",
     fullscreenDelay: "4500.4",
     includeFloating: 1,
     stickyFullscreen: 1,
+    columns: {
+      "2": { enabled: true, open: "vertical" },
+      "special:scratchpad": { enabled: true },
+      "bad-entry": "nope",
+      "": { enabled: true }
+    },
     nodePath: "relative/node",
     hyprctlPath: "/usr/bin/hyprctl",
     timeoutPath: "/usr/bin/timeout"
@@ -50,6 +57,7 @@ test("config normalization covers every supported option", () => {
   assert.equal(normalized.expandMode, "fullscreen")
   assert.equal(normalized.widthMultiplier, 0.85)
   assert.equal(normalized.heightMultiplier, 0.85)
+  assert.equal(normalized.collapseSize, 75)
   assert.equal(normalized.hoverDelay, 251)
   assert.equal(normalized.fullscreenDelay, 4500)
   assert.equal(normalized.includeFloating, true)
@@ -58,6 +66,10 @@ test("config normalization covers every supported option", () => {
     node: "",
     hyprctl: "/usr/bin/hyprctl",
     timeout: "/usr/bin/timeout"
+  })
+  assert.deepEqual(normalized.columns, {
+    "2": { enabled: true, open: "vertical", mode: "columns" },
+    "special:scratchpad": { enabled: true, open: "horizontal", mode: "columns" }
   })
 })
 
@@ -70,6 +82,18 @@ test("fullscreen delay clamps to the 1s floor so the release hold cannot loop", 
   assert.equal(M.normalizeFullscreenDelay("bad"), 5000)
   assert.equal(M.stepFullscreenDelay(1000, -1), 1000)
   assert.equal(M.stepFullscreenDelay(1000, 1), 1500)
+})
+
+test("collapse size clamps to safe bounds and steps cleanly from the 57px default", () => {
+  assert.equal(M.normalizeCollapseSize(undefined), 57)
+  assert.equal(M.normalizeCollapseSize("bad"), 57)
+  assert.equal(M.normalizeCollapseSize(10), 32)
+  assert.equal(M.normalizeCollapseSize(999), 300)
+  assert.equal(M.normalizeCollapseSize(80.4), 80)
+  assert.equal(M.stepCollapseSize(57, -1), 52)
+  assert.equal(M.stepCollapseSize(57, 1), 62)
+  assert.equal(M.stepCollapseSize(32, -1), 32)
+  assert.equal(M.stepCollapseSize(300, 1), 300)
 })
 
 test("window and client parsing tolerates Hyprland variants and malformed input", () => {
@@ -92,7 +116,7 @@ test("monitor parsing applies scale and reserved work-area edges", () => {
     { id: 0, x: 100, y: 50, width: 2000, height: 1200, scale: 2, reserved: [20, 40, 60, 80], focused: true },
     { id: 1, x: 0, y: 0, width: 100, height: 100, scale: 0, reserved: [] }
   ]))
-  assert.deepEqual(monitors[0].wa, { x: 60, y: 45, w: 960, h: 540 })
+  assert.deepEqual(monitors[0].wa, { x: 120, y: 90, w: 920, h: 480 })
   assert.deepEqual(monitors[1].wa, { x: 0, y: 0, w: 100, h: 100 })
   assert.deepEqual(M.parseMonitors("bad"), {})
 })
@@ -161,8 +185,8 @@ test("floating targets need a monitor work area and obey the minimum size", () =
     { id: 0, x: 0, y: 0, width: 100, height: 90, scale: 1, reserved: [0, 10, 0, 10], focused: true }
   ]))
   const target = M.floatingTarget(focused, monitors, { widthMultiplier: 0.5, heightMultiplier: 0.5 })
-  assert.equal(target.w, 80)
-  assert.equal(target.h, 80)
+  assert.equal(target.w, 57)
+  assert.equal(target.h, 57)
   assert.equal(M.floatingTarget(focused, {}, { widthMultiplier: 0.5, heightMultiplier: 0.5 }), null)
 })
 

@@ -13,7 +13,7 @@ test("plugin metadata and packaged entry points agree", () => {
 
   assert.equal(manifest.id, "zumico.focus-now")
   assert.equal(manifest.version, pkg.version)
-  assert.equal(manifest.keepLoaded, false)
+  assert.equal(manifest.keepLoaded, true)
   assert.equal(manifest.entryPoints.service, "Service.qml")
   assert.equal(manifest.entryPoints.barWidget, "Panel.qml")
   read(manifest.entryPoints.service)
@@ -35,7 +35,10 @@ test("the service passes all managed state needed by apply.js", () => {
     'config.hoverFocus ? "1" : "0"',
     "priorManagedAddress",
     "priorManagedMode",
-    "config.expandMode"
+    "config.expandMode",
+    "String(config.collapseSize)",
+    'config.animate ? "1" : "0"',
+    "String(config.animateSpeed)"
   ]) {
     assert.ok(command.includes(expected), `missing ${expected}`)
   }
@@ -97,6 +100,7 @@ test("all public IPC controls map to normalized service settings", () => {
     "fullscreen", "stickyOn", "stickyOff", "stickyToggle", "near", "noExpand",
     "width", "height", "widthUp", "widthDown",
     "heightUp", "heightDown", "refresh",
+    "collapseSize", "collapseSizeUp", "collapseSizeDown",
     "hoverDelay", "hoverDelayUp", "hoverDelayDown",
     "fullscreenDelay", "fullscreenDelayUp", "fullscreenDelayDown"
   ]) {
@@ -106,6 +110,8 @@ test("all public IPC controls map to normalized service settings", () => {
   assert.match(source, /setHeightMultiplier\(value\).*nearestMultiplier/)
   assert.match(source, /stepWidth\(direction\).*stepMultiplier/)
   assert.match(source, /stepHeight\(direction\).*stepMultiplier/)
+  assert.match(source, /setCollapseSize\(value\).*normalizeCollapseSize/)
+  assert.match(source, /stepCollapseSize\(direction\).*stepCollapseSize/)
 })
 
 test("panel strings all exist in the packaged locale", () => {

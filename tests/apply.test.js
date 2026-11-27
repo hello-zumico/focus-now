@@ -51,18 +51,78 @@ function targetAddress(code) {
   match = String(code).match(/window = "address:([^"]+)"/)
   return match ? match[1] : ""
 }
+function recalcComb(next) {
+  const n = next.clients.length
+  const ratios = next.combRatios
+  const boxes = new Array(n)
+  let x = 10
+  let w = next.combSpan || 1516
+  for (let depth = n - 1; depth >= 1; depth--) {
+    const first = w / 2 * ratios[depth - 1]
+    boxes[depth] = { x: x + first, w: w - first }
+    w = first
+  }
+  boxes[0] = { x: x, w: w }
+  for (let i = 0; i < n; i++) {
+    const padL = i === 0 ? 2 : 7
+    const padR = i === n - 1 ? 2 : 7
+    next.clients[i].at = [Math.round(boxes[i].x + padL), next.clients[i].at[1]]
+    next.clients[i].size = [Math.round(boxes[i].w - padL - padR), next.clients[i].size[1]]
+  }
+  next.combBoxes = boxes
+}
+function resizeComb(next, address, dx) {
+  const index = next.clients.findIndex(w => w.address === address)
+  if (index < 0 || !dx) return
+  const splitIndex = index === 0 ? 0 : index - 1
+  const n = next.clients.length
+  let parentW = next.combSpan || 1516
+  for (let depth = n - 1; depth > splitIndex + 1; depth--) {
+    parentW = parentW / 2 * next.combRatios[depth - 1]
+  }
+  next.combRatios[splitIndex] = Math.max(0.1, Math.min(1.9, next.combRatios[splitIndex] + dx * 2 / parentW))
+  recalcComb(next)
+}
+// An absolute resize on a tiled window asks the compositor for an exact
+// size: dwindle solves the nearest split ratio for it. box[i].w for i>0 is
+// parentW * (1 - r[i-1]/2) with parentW = span * Π r[k]/2 over k=i..n-2;
+// box[0].w is the chain of firsts, span * Π r[k]/2 over k=0..n-2, so r[0]
+// solves directly for its width.
+function absResizeComb(next, address, targetW) {
+  const index = next.clients.findIndex(w => w.address === address)
+  if (index < 0) return
+  const n = next.clients.length
+  const span = next.combSpan || 1516
+  const clamp = v => Math.max(0.1, Math.min(1.9, v))
+  if (index === 0) {
+    let outer = span
+    for (let k = 1; k <= n - 2; k++) outer = outer * next.combRatios[k] / 2
+    next.combRatios[0] = clamp(2 * targetW / outer)
+  } else {
+    let parentW = span
+    for (let k = index; k <= n - 2; k++) parentW = parentW * next.combRatios[k] / 2
+    next.combRatios[index - 1] = clamp(2 * (1 - targetW / parentW))
+  }
+  recalcComb(next)
+}
 function resizeClients(code) {
   const next = state()
   for (const match of String(code).matchAll(/window\\.resize\\(\\{ window = "address:([^"]+)", x = (-?\\d+), y = (-?\\d+), relative = (true|false) \\}\\)/g)) {
     if (next.ignoreResize) continue
+    if (next.combRatios) {
+      if (match[4] === "true") resizeComb(next, match[1], Number(match[2]))
+      else absResizeComb(next, match[1], Number(match[2]))
+      continue
+    }
     const client = next.clients.find(w => w.address === match[1])
     if (!client) continue
     const dx = Number(match[2])
     const dy = Number(match[3])
+    const floorW = (next.widthFloors || {})[client.address] || 1
     if (match[4] === "true") {
-      client.size = [Math.max(1, client.size[0] + dx), Math.max(1, client.size[1] + dy)]
+      client.size = [Math.max(floorW, client.size[0] + dx), Math.max(1, client.size[1] + dy)]
     } else {
-      client.size = [Math.max(1, dx), Math.max(1, dy)]
+      client.size = [Math.max(floorW, dx), Math.max(1, dy)]
     }
   }
   save(next)
@@ -103,8 +163,18 @@ function fullscreenStates(code) {
   if (/internal = 1, client = 1/.test(code)) {
     const client = next.clients.find(w => w.address === target)
     if (client) {
-      client.fullscreen = 1
-      client.fullscreenClient = 1
+      // Simulate the eval's atomic sibling check: when it carries
+      // get_workspace_windows, only maximize if the live state still shows
+      // the target alone on its workspace.
+      const ws = client.workspace && client.workspace.id
+      const siblings = /siblings <= 1/.test(code)
+        ? next.clients.filter(w => !w.floating && w.mapped !== false &&
+            ws !== undefined && w.workspace && w.workspace.id === ws).length
+        : 1
+      if (siblings <= 1) {
+        client.fullscreen = 1
+        client.fullscreenClient = 1
+      }
     }
   }
   if (/internal = 2, client = 1/.test(code)) {
@@ -120,7 +190,16 @@ if (args[0] === "-j") {
   const next = state()
   const key = args[1]
   if (key === "activewindow") console.log(JSON.stringify(next.activewindow || {}))
-  else if (key === "clients") console.log(JSON.stringify(next.clients || []))
+  else if (key === "clients") {
+    console.log(JSON.stringify(next.clients || []))
+    // clientsBump: after N reads, a new window maps mid-apply — simulates the
+    // snapshot-vs-live race the atomic sibling check guards against.
+    if (next.clientsBump && next.clientsBumpClient) {
+      next.clientsCalls = (next.clientsCalls || 0) + 1
+      if (next.clientsCalls === next.clientsBump) next.clients.push(next.clientsBumpClient)
+      save(next)
+    }
+  }
   else if (key === "activeworkspace") console.log(JSON.stringify(next.activeworkspace || {}))
   else if (key === "workspaces") console.log(JSON.stringify(next.workspaces || []))
   else if (key === "monitors") console.log(JSON.stringify(next.monitors || []))
@@ -150,9 +229,11 @@ if (args[0] === "eval" || args[0] === "dispatch") {
     next.top = targetAddress(code)
     save(next)
   }
-  if (/layout\\("colresize ([^)]+)"\\)/.test(code)) {
+  const colresizes = [...String(code).matchAll(/layout\\("colresize ([^)]+)"\\)/g)].map(m => m[1])
+  if (colresizes.length) {
     const next = state()
-    next.colresize = code.match(/layout\\("colresize ([^)]+)"\\)/)[1]
+    next.colresizes = (next.colresizes || []).concat(colresizes)
+    next.colresize = colresizes[colresizes.length - 1]
     save(next)
   }
   if (/layout\\("center"\\)/.test(code)) {
@@ -163,6 +244,22 @@ if (args[0] === "eval" || args[0] === "dispatch") {
   if (/layout\\("movetoroot"\\)/.test(code)) {
     const next = state()
     next.movedToRoot = true
+    save(next)
+  }
+  // Batched focus + togglesplit sequences are applied in order: a focus makes
+  // the window active, a togglesplit flips the focused window's node — a
+  // column sliver becomes a wide band and vice versa.
+  let lastFocus = null
+  for (const m of String(code).matchAll(/focus\\(\\{ window = "address:([^"]+)" \\}\\)|layout\\("togglesplit"\\)/g)) {
+    const next = state()
+    if (m[1]) {
+      lastFocus = m[1]
+      const c = next.clients.find(w => w.address === m[1])
+      if (c) next.activewindow = c
+    } else if (lastFocus) {
+      const c = next.clients.find(w => w.address === lastFocus)
+      if (c) c.size = c.size[1] > c.size[0] ? [1400, 32] : [40, 700]
+    }
     save(next)
   }
   process.exit(0)
@@ -335,6 +432,22 @@ test("a tiled window is still treated as alone when floating windows are exclude
   const result = runApply(fx, applyArgs(fx, "a"))
   assert.equal(result.stdout, '{"address":"a","managed":"maximized"}')
   assert.match(result.log, /internal = 1, client = 1/)
+})
+
+test("a stale lone-window snapshot does not maximize when a sibling mapped mid-apply", t => {
+  // The clients snapshot can lag the compositor: a second window maps between
+  // the snapshot that decides "only window" and the maximize dispatch. The
+  // eval's atomic sibling check must veto it, and the window falls through to
+  // a normal tiled apply instead of being recorded as managed.
+  const a = win("a", 0, 40, 500, 760)
+  const b = win("b", 500, 40, 500, 760)
+  const fx = fixture(t, workspaceState([a], { clientsBump: 2, clientsBumpClient: b }))
+  const result = runApply(fx, applyArgs(fx, "a"))
+  assert.equal(result.stdout, '{"address":"a","managed":""}')
+  assert.equal(result.state.clients[0].fullscreen, 0)
+  assert.equal(result.state.clients[0].fullscreenClient, 0)
+  // The normal tiled apply still ran for the two windows.
+  assert.match(result.log, /window\.resize|splitratio|preselect/)
 })
 
 test("scrolling layout applies the column share without a redundant center", t => {
@@ -605,12 +718,93 @@ test("a cross-workspace multi-window apply also stays silent", t => {
   assert.equal(result.state.clients[0].fullscreenClient, 1)
 })
 
-test("a repeated nested layout falls back to movetoroot only once", t => {
+test("a non-converging layout never reorders windows", t => {
   const a = win("a", 0, 40, 500, 760)
   const b = win("b", 500, 40, 500, 760)
   const fx = fixture(t, workspaceState([a, b], { ignoreResize: true }))
   const result = runApply(fx, applyArgs(fx, "a"))
-  assert.equal(result.stdout, '{"address":"a","managed":""}')
-  assert.equal(result.state.movedToRoot, true)
-  assert.equal((result.log.match(/movetoroot/g) || []).length, 1)
+  // The focused window is far under target while a sibling holds a takeable
+  // surplus, so a retry is legitimately requested — but nothing may reorder.
+  assert.equal(result.stdout, '{"address":"a","managed":"","repair":true}')
+  assert.equal(result.state.movedToRoot, undefined)
+  assert.doesNotMatch(result.log, /movetoroot/)
+})
+
+test("nested dwindle comb expands every window in place and collapses all siblings to floor", t => {
+  const a = win("a", 12, 12, 181, 814)
+  const b = win("b", 207, 12, 175, 814)
+  const c = win("c", 396, 12, 365, 814)
+  const d = win("d", 775, 12, 749, 814)
+  const initial = workspaceState([a, b, c, d], {
+    monitors: [{ id: 0, x: 0, y: 0, width: 1536, height: 864, scale: 1, reserved: [0, 38, 0, 0], focused: true }],
+    combRatios: [1.0, 1.0, 1.0],
+    combSpan: 1516
+  })
+  const fx = fixture(t, initial)
+  for (let step = 0; step < 6; step++) {
+    const focused = ["a", "b", "c", "d", "a", "d"][step]
+    const current = JSON.parse(fs.readFileSync(fx.statePath, "utf8"))
+    current.activewindow = current.clients.find(w => w.address === focused)
+    fs.writeFileSync(fx.statePath, JSON.stringify(current))
+    fs.writeFileSync(fx.logPath, "")
+    const args = [focused, "0.95", "0.95", "0", "1", fx.hyprctl, "", "", "near", "0"]
+    const result = runApply(fx, args)
+    assert.equal(result.stdout, `{"address":"${focused}","managed":""}`)
+    assert.doesNotMatch(result.log, /movetoroot|window\.swap/)
+    if (step > 0) {
+      const resizeBatches = result.log.trim().split("\n").filter(line => line.includes("window.resize"))
+      assert.ok(resizeBatches.length <= 6, `warm-cache transition ${focused} ran without rebound (${resizeBatches.length} batches)`)
+    }
+    const clients = result.state.clients
+    for (let i = 0; i < clients.length - 1; i++) {
+      assert.ok(clients[i].at[0] < clients[i + 1].at[0], `order preserved for ${focused}`)
+    }
+    for (const client of clients) {
+      if (client.address === focused) {
+        // Equalizing collapsed slivers grows the narrow ones by pulling space
+        // from the left subtree — often the focused window — so allow for
+        // that cost on top of the expanded target.
+        assert.ok(client.size[0] >= 1240, `focused ${focused} expanded (${client.size[0]})`)
+      } else {
+        assert.ok(client.size[0] >= 55 && client.size[0] <= 68,
+          `sibling ${client.address} collapsed near 57px (${client.size[0]}) when ${focused} focused`)
+      }
+    }
+    if (focused === "d") {
+      const collapsed = clients.filter(w => w.address !== "d").map(w => w.size[0])
+      assert.ok(Math.max(...collapsed) - Math.min(...collapsed) <= 1,
+        `all collapsed siblings equal when d focused: ${collapsed.join(",")}`)
+    }
+  }
+
+  // A repeat apply on the converged state should be nearly free — no resize
+  // rebound from the main pass and a no-op from the sliver equalizer.
+  fs.writeFileSync(fx.logPath, "")
+  const warmResult = runApply(fx, ["d", "0.95", "0.95", "0", "1", fx.hyprctl, "", "", "near", "0"])
+  const warmBatches = warmResult.log.trim().split("\n").filter(line => line.includes("window.resize"))
+  assert.ok(warmBatches.length <= 1, `converged state reapply was cheap (${warmBatches.length} batches)`)
+
+  // Custom collapseSize (e.g. 90px) holds every collapsed sibling to ~90px.
+  const customResult = runApply(fx, ["d", "0.95", "0.95", "0", "1", fx.hyprctl, "", "", "near", "0", "90"])
+  const customCollapsed = customResult.state.clients.filter(w => w.address !== "d").map(w => w.size[0])
+  for (const w of customCollapsed) {
+    assert.ok(w >= 89 && w <= 91, `custom collapseSize=90 applied (${w})`)
+  }
+})
+
+test("a collapsed column pinned above the collapse size is reoriented to a band", t => {
+  const a = win("a", 12, 40, 1300, 760)
+  const pinned = win("s1", 1330, 40, 62, 760)
+  const normal = win("s2", 1400, 40, 37, 760)
+  const fx = fixture(t, workspaceState([a, pinned, normal], {
+    widthFloors: { s1: 62 },
+    monitors: [{ id: 0, x: 0, y: 0, width: 1536, height: 864, scale: 1, reserved: [0, 38, 0, 0], focused: true }]
+  }))
+  const result = runApply(fx, ["a", "0.95", "0.95", "0", "1", fx.hyprctl, "", "", "near", "0", "32"])
+  const splits = result.log.trim().split("\n").filter(line => line.includes("togglesplit"))
+  assert.equal(splits.length, 1, `one togglesplit for the pinned sliver: ${result.log}`)
+  const after = result.state.clients.find(w => w.address === "s1")
+  assert.ok(after.size[0] > after.size[1], `pinned sliver became a band (${after.size.join("x")})`)
+  const untouched = result.state.clients.find(w => w.address === "s2")
+  assert.ok(untouched.size[1] > untouched.size[0], `in-floor sliver left alone (${untouched.size.join("x")})`)
 })

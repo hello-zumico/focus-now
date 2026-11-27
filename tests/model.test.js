@@ -115,7 +115,7 @@ test("layout ops resize the focused split edge", () => {
   assert.match(M.resizeCommand("a", 10, 0), /relative = true/)
 })
 
-test("every unfocused strip is held to its minimum width", () => {
+test("every unfocused strip shares the remainder evenly", () => {
   const scaled = M.parseMonitors(JSON.stringify([
     { id: 0, x: 0, y: 0, width: 1920, height: 1080, scale: 1.25, reserved: [0, 0, 0, 26], focused: true }
   ]))
@@ -126,9 +126,9 @@ test("every unfocused strip is held to its minimum width", () => {
   const clients = clientMap(focused, left, topRight, bottomRight)
   const targets = M.layoutTargets(clients.focused, clients, scaled, { ...cfg, widthMultiplier: 0.85 })
   assert.equal(targets.focused.w, 1261)
-  assert.equal(targets.left.w, 136)
-  assert.equal(targets["top-right"].w, 87)
-  assert.equal(targets["bottom-right"].w, 87)
+  assert.equal(targets.left.w, 112)
+  assert.equal(targets["top-right"].w, 111)
+  assert.equal(targets["bottom-right"].w, 111)
   const plan = M.layoutOps(clients.focused, clients, scaled, { ...cfg, widthMultiplier: 0.85 })
   assert.ok(plan.ops.some(op => op.address === "focused" && op.dx < 0 && op.candidate === 0))
   assert.ok(plan.ops.some(op => op.address === "left" && op.dx < 0 && op.candidate > 0))
@@ -208,6 +208,10 @@ test("managed fullscreen states are reused only for the requested mode", () => {
   assert.equal(M.managedFullscreenApplies(fullscreen, "a", "fullscreen", "fullscreen", false), true)
   assert.equal(M.managedFullscreenApplies(fullscreen, "a", "fullscreen", "near", false), false)
   assert.match(M.setManagedMaximizedEval("a"), /internal = 1, client = 1/)
+  // The eval re-counts live workspace windows before maximizing so a stale
+  // clients snapshot cannot wrongly maximize a window that has siblings.
+  assert.match(M.setManagedMaximizedEval("a"), /get_workspace_windows/)
+  assert.match(M.setManagedMaximizedEval("a"), /siblings <= 1/)
 })
 
 test("a focused window in a shared edge column resizes its own boundary", () => {
@@ -244,7 +248,8 @@ test("stacked rows resize the focused row's own boundary", () => {
   assert.ok(upperPlan.ops.some(op => op.address === "upper" && op.dy < 0 && op.candidate === 0))
   assert.ok(bottomPlan.ops.some(op => op.address === "bottom" && op.dy < 0 && op.candidate === 0))
   assert.ok(topPlan.ops.some(op => op.address === "middle" && op.dy < 0 && op.candidate > 0))
-  assert.equal(M.layoutOps(clients.middle, clients, stackedMonitors, cfg85).ops.length, 0)
+  assert.ok(M.layoutOps(clients.middle, clients, stackedMonitors, cfg85)
+    .ops.some(op => op.address === "middle" && op.dy !== 0 && op.candidate === 0))
 })
 
 test("target completion tolerates compositor borders and gaps", () => {
@@ -252,8 +257,8 @@ test("target completion tolerates compositor borders and gaps", () => {
   assert.equal(M.targetReached({ w: 1200, h: 532 }, { w: 1536, h: 532 }), false)
 })
 
-test("nested splits can promote the focused window to the root", () => {
-  assert.match(M.moveToRootEval(), /hl\.dsp\.layout\("movetoroot"\)/)
+test("the model exposes no layout-reordering dispatch", () => {
+  assert.equal(M.moveToRootEval, undefined)
 })
 
 test("hover bridge handles floating-mode input changes without polling", () => {

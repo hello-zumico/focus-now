@@ -36,8 +36,16 @@ Item {
   property string binNode: ""
 
   property string pendingAddress: ""
+  property string repairRetryAddress: ""
+  property int repairRetries: 0
+  property int repairDeadline: 0
   property string lastHandledAddress: ""
   property bool applying: false
+  // Workspace awaiting lua:columns adoption verification. Armed only after the
+  // rule-write process exits so an unrelated workspaces refresh cannot observe
+  // the stale pre-rule layout and falsely revert.
+  property string pendingColumnsVerify: ""
+  property string pendingColumnsVerifyName: ""
   property bool hoverHeld: false
   property bool hoverBridgeInstalled: false
   property bool stateBridgeInstalled: false
@@ -86,11 +94,15 @@ Item {
       expandMode: normalized.expandMode,
       widthMultiplier: normalized.widthMultiplier,
       heightMultiplier: normalized.heightMultiplier,
+      collapseSize: normalized.collapseSize,
       hoverDelay: normalized.hoverDelay,
       fullscreenDelay: normalized.fullscreenDelay,
       includeFloating: normalized.includeFloating,
       stickyFullscreen: normalized.stickyFullscreen,
-      mouseRefocus: normalized.mouseRefocus
+      mouseRefocus: normalized.mouseRefocus,
+      animate: normalized.animate,
+      animateSpeed: normalized.animateSpeed,
+      columns: normalized.columns
     }, null, 2) + "\n")
   }
 
@@ -98,6 +110,9 @@ Item {
   function setHoverFocus(value) { saveConfig({ hoverFocus: !!value }) }
   function setStickyFullscreen(value) { saveConfig({ stickyFullscreen: !!value }) }
   function setMouseRefocus(value) { saveConfig({ mouseRefocus: !!value }) }
+  function setAnimate(value) { saveConfig({ animate: !!value }) }
+  function setAnimateSpeed(value) { saveConfig({ animateSpeed: Model.normalizeAnimateSpeed(value) }) }
+  function stepAnimateSpeed(direction) { saveConfig({ animateSpeed: Model.stepAnimateSpeed(config.animateSpeed, direction) }) }
   function setMode(mode) {
     if (Model.EXPAND_MODES.indexOf(mode) < 0) mode = "off"
     saveConfig({ expandMode: mode })
@@ -106,10 +121,96 @@ Item {
   function setHeightMultiplier(value) { saveConfig({ heightMultiplier: Model.nearestMultiplier(value, 0.85) }) }
   function stepWidth(direction) { saveConfig({ widthMultiplier: Model.stepMultiplier(config.widthMultiplier, direction) }) }
   function stepHeight(direction) { saveConfig({ heightMultiplier: Model.stepMultiplier(config.heightMultiplier, direction) }) }
+  function setCollapseSize(value) { saveConfig({ collapseSize: Model.normalizeCollapseSize(value) }) }
+  function stepCollapseSize(direction) { saveConfig({ collapseSize: Model.stepCollapseSize(config.collapseSize, direction) }) }
   function setHoverDelay(value) { saveConfig({ hoverDelay: Model.normalizeHoverDelay(value) }) }
   function stepHoverDelay(direction) { saveConfig({ hoverDelay: Model.stepHoverDelay(config.hoverDelay, direction) }) }
   function setFullscreenDelay(value) { saveConfig({ fullscreenDelay: Model.normalizeFullscreenDelay(value) }) }
   function stepFullscreenDelay(direction) { saveConfig({ fullscreenDelay: Model.stepFullscreenDelay(config.fullscreenDelay, direction) }) }
+
+  // Per-workspace columns layout ("lua:columns" via hl.workspace_rule). The
+  // rule switches the workspace's layout live; the layout file reads open
+  // direction and enablement back from this same config object.
+  function workspaceColumnsEntry(name) {
+    var cols = (rawConfig && rawConfig.columns) || {}
+    return Object.assign({ enabled: false, open: "horizontal", mode: "columns" }, cols[name] || {})
+  }
+
+  function setWorkspaceColumns(name, enabled) {
+    var cols = Object.assign({}, (rawConfig && rawConfig.columns) || {})
+    var entry = workspaceColumnsEntry(name)
+    entry.enabled = !!enabled
+    cols[String(name)] = entry
+    saveConfig({ columns: cols })
+    workspaceRuleEval(String(name), !!enabled, entry.mode)
+  }
+
+  function setWorkspaceOpen(name, open) {
+    var cols = Object.assign({}, (rawConfig && rawConfig.columns) || {})
+    var entry = workspaceColumnsEntry(name)
+    entry.open = open === "vertical" ? "vertical" : "horizontal"
+    cols[String(name)] = entry
+    saveConfig({ columns: cols })
+  }
+
+  function setWorkspaceMode(name, mode) {
+    var cols = Object.assign({}, (rawConfig && rawConfig.columns) || {})
+    var entry = workspaceColumnsEntry(name)
+    entry.mode = mode === "rows" ? "rows" : "columns"
+    cols[String(name)] = entry
+    saveConfig({ columns: cols })
+    if (entry.enabled) workspaceRuleEval(String(name), true, entry.mode)
+  }
+
+  function workspaceRuleEval(name, enabled, mode) {
+    if (!root.ipcOwner) return
+    root.pendingColumnsVerifyName = enabled ? String(name) : ""
+    root.pendingColumnsVerify = ""
+    workspaceRuleProc.command = [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "eval",
+      "hl.workspace_rule({ workspace = " + JSON.stringify(name) +
+      ", layout = \"" + (enabled ? "lua:" + (mode === "rows" ? "rows" : "columns") : "dwindle") + "\" })"]
+    workspaceRuleProc.running = false
+    workspaceRuleProc.running = true
+  }
+
+  function refreshWorkspaces() {
+    if (!root.ipcOwner || root.destroyed) return
+    workspacesProc.running = false
+    workspacesProc.running = true
+  }
+
+  // Rows shown by the panel: every workspace hyprctl knows about plus every
+  // configured columns workspace plus the scratchpad, so a special workspace
+  // can be enabled before it exists. Enabled reflects the workspace's actual
+  // reported layout, so a compositor-wide lua:columns default shows truthfully.
+  readonly property var workspaceRows: {
+    var names = {}
+    var layouts = {}
+    var list = root.workspaces || []
+    for (var i = 0; i < list.length; i++) {
+      var nm = String(list[i].name || "")
+      if (nm) { names[nm] = true; layouts[nm] = String(list[i].layout || "") }
+    }
+    var cols = (config && config.columns) || {}
+    for (var key in cols) names[key] = true
+    names["special:scratchpad"] = true
+    var ordered = Object.keys(names).sort(function(a, b) {
+      var an = /^special:/.test(a), bn = /^special:/.test(b)
+      if (an !== bn) return an ? 1 : -1
+      if (an) return a < b ? -1 : 1
+      return Number(a) - Number(b)
+    })
+    var rows = []
+    for (i = 0; i < ordered.length; i++) {
+      var n = ordered[i]
+      var e = cols[n] || {}
+      var enabled = layouts[n] ? layouts[n] === "lua:columns" || layouts[n] === "lua:rows" : !!e.enabled
+      var mode = layouts[n] === "lua:rows" ? "rows" : (layouts[n] === "lua:columns" ? "columns" : (e.mode === "rows" ? "rows" : "columns"))
+      rows.push({ name: n, special: /^special:/.test(n), enabled: enabled, open: e.open || "horizontal", mode: mode })
+    }
+    return rows
+  }
+  property var workspaces: []
 
   function nodeCandidates() {
     return [
@@ -139,7 +240,30 @@ Item {
     root.ipcOwner = true
     root.syncBins()
     root.resolveNode()
+    root.installFlatLayout()
     root.syncBridges()
+    root.refreshWorkspaces()
+  }
+
+  // The flat layouts live in Hyprland's lua state, which resets on every
+  // config load, so nothing installed through hyprctl eval survives a reload.
+  // Ship the provider as ~/.config/hypr/focus-now-columns.lua and guarantee a
+  // pcall-guarded require inside hyprland.lua — the same marker convention
+  // Omarchist and hyprmoncfg use — so the layouts, their key translation, and
+  // the layoutmsg verbs always come back with the user's config. Copying
+  // every start keeps the file in step with plugin updates; reload only when
+  // something changed.
+  function installFlatLayout() {
+    flatLayoutInstallProc.command = ["/usr/bin/bash", "-c",
+      'src="$1"; dst="$HOME/.config/hypr/focus-now-columns.lua"; cfg="$HOME/.config/hypr/hyprland.lua"; ' +
+      'changed=0; ' +
+      'if ! cmp -s "$src" "$dst" 2>/dev/null; then install -Dm644 "$src" "$dst"; changed=1; fi; ' +
+      'if ! grep -qF "hypr.focus-now-columns" "$cfg" 2>/dev/null; then ' +
+      'printf "\\n-- Added by focus-now (zumico.focus-now): flat columns/rows layout provider.\\npcall(require, \\"hypr.focus-now-columns\\")\\n" >> "$cfg"; changed=1; fi; ' +
+      'if [ "$changed" = 1 ]; then hyprctl reload; fi',
+      "bash", root.pluginDir + "/columns.lua"]
+    flatLayoutInstallProc.running = false
+    flatLayoutInstallProc.running = true
   }
 
   function installStateBridge() {
@@ -259,7 +383,11 @@ Item {
       return
     }
     root.pendingAddress = address
-    debounce.restart()
+    // Focus events emitted by a running apply's own dispatches (the scrolling
+    // collapse sequence focuses every column in turn) must not re-arm the
+    // debounce — actionProc.onExited restarts it when the pending address is
+    // actually a new target.
+    if (!root.applying) debounce.restart()
   }
 
   function centerEval(address) {
@@ -300,7 +428,10 @@ Item {
         priorManagedAddress,
         priorManagedMode,
         config.expandMode,
-        config.stickyFullscreen ? "1" : "0"
+        config.stickyFullscreen ? "1" : "0",
+        String(config.collapseSize),
+        config.animate ? "1" : "0",
+        String(config.animateSpeed)
       ]
       actionProc.running = false
       actionProc.running = true
@@ -322,9 +453,12 @@ Item {
       expandMode: config.expandMode,
       widthMultiplier: config.widthMultiplier,
       heightMultiplier: config.heightMultiplier,
+      collapseSize: config.collapseSize,
       hoverDelay: config.hoverDelay,
       fullscreenDelay: config.fullscreenDelay,
       includeFloating: config.includeFloating,
+      animate: config.animate,
+      animateSpeed: config.animateSpeed,
       stickyFullscreen: config.stickyFullscreen,
       mouseRefocus: config.mouseRefocus,
       active: lastHandledAddress,
@@ -402,6 +536,15 @@ Item {
   }
 
   Timer {
+    id: repairRetryTimer
+    interval: 400
+    repeat: false
+    onTriggered: {
+      if (root.repairRetryAddress) root.requestRefresh(root.repairRetryAddress)
+    }
+  }
+
+  Timer {
     id: holdReleaseTimer
     interval: 250
     repeat: true
@@ -464,6 +607,76 @@ Item {
   }
 
   Process {
+    id: flatLayoutInstallProc
+  }
+
+  Process {
+    id: workspaceRuleProc
+    onExited: function(code) {
+      if (!root || root.destroyed) return
+      if (root.pendingColumnsVerifyName) {
+        root.pendingColumnsVerify = root.pendingColumnsVerifyName
+        root.pendingColumnsVerifyName = ""
+        refreshWorkspaces()
+      }
+    }
+  }
+
+  Process {
+    id: workspacesProc
+    command: [root.timeoutBinary, "-k", "2", "3", root.hyprctlBinary, "-j", "workspaces"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (!root || root.destroyed) return
+        var list = Model.parseJson(text, [])
+        var names = []
+        if (Array.isArray(list)) {
+          for (var i = 0; i < list.length; i++) {
+            var name = String(list[i].name || "")
+            if (name) names.push({ name: name, layout: String(list[i].tiledLayout || "") })
+          }
+        }
+        root.workspaces = names
+
+        // A lua:columns workspace rule silently stays on dwindle when the
+        // layout provider is not registered (e.g. columns.lua not installed).
+        // Revert the toggle in that case instead of leaving a dead config.
+        var pending = root.pendingColumnsVerify
+        if (pending) {
+          var seen = null
+          for (var i = 0; i < names.length; i++) {
+            if (names[i].name === pending) { seen = names[i]; break }
+          }
+          if (seen) {
+            root.pendingColumnsVerify = ""
+            if (seen.layout !== "lua:columns") {
+              root.log("columns layout not registered; leaving workspace " + pending + " on dwindle")
+              var cols = Object.assign({}, (rawConfig && rawConfig.columns) || {})
+              var entry = Object.assign({ enabled: false, open: "horizontal" }, cols[pending] || {})
+              entry.enabled = false
+              cols[pending] = entry
+              saveConfig({ columns: cols })
+              workspaceRuleEval(pending, false)
+            }
+          }
+          // A workspace that does not exist yet (e.g. special:scratchpad before
+          // it is opened) stores the rule for later; keep pending until it
+          // appears and reports an actual layout.
+        }
+      }
+    }
+  }
+
+  Timer {
+    id: workspacesPoll
+    interval: 5000
+    repeat: true
+    running: root.ipcOwner && !root.destroyed
+    onTriggered: root.refreshWorkspaces()
+  }
+
+  Process {
     id: ipcLockProc
     command: ["/usr/bin/mkdir", root.serviceLockPath]
     onExited: function(code) {
@@ -507,6 +720,30 @@ Item {
             root.managedFullscreenAddrs = tracked
           }
           root.startFloatingHoverMonitor()
+          // An apply can exit with a workspace still mid-repair (cooldowns
+          // bounded its tools). Re-apply on a short delay so wedged trees
+          // converge without waiting for a focus event: a fast phase of
+          // short-interval retries, then a slow tail until the deadline —
+          // a deep wedge keeps healing while an unfixable tree is only
+          // nudged occasionally instead of looping applies forever.
+          if (result.repair) {
+            var now = Date.now()
+            var addr = String(result.address)
+            if (addr !== root.repairRetryAddress || !root.repairDeadline) {
+              root.repairRetries = 0
+              root.repairDeadline = now + 90000
+            }
+            if (root.repairRetries < 10 || now < root.repairDeadline) {
+              root.repairRetries += 1
+              root.repairRetryAddress = addr
+              repairRetryTimer.interval = root.repairRetries <= 10 ? 400 : 15000
+              repairRetryTimer.restart()
+            }
+          } else {
+            root.repairRetries = 0
+            root.repairRetryAddress = ""
+            root.repairDeadline = 0
+          }
         }
       }
     }
@@ -699,6 +936,12 @@ Item {
     function stickyOn(): string { root.setStickyFullscreen(true); return "on" }
     function stickyOff(): string { root.setStickyFullscreen(false); return "off" }
     function stickyToggle(): string { root.setStickyFullscreen(!root.config.stickyFullscreen); return root.config.stickyFullscreen ? "on" : "off" }
+    function animateOn(): string { root.setAnimate(true); return "on" }
+    function animateOff(): string { root.setAnimate(false); return "off" }
+    function animateToggle(): string { root.setAnimate(!root.config.animate); return root.config.animate ? "on" : "off" }
+    function animateSpeed(value: string): string { root.setAnimateSpeed(Number(value)); return String(root.config.animateSpeed) }
+    function animateSpeedUp(): string { root.stepAnimateSpeed(1); return String(root.config.animateSpeed) }
+    function animateSpeedDown(): string { root.stepAnimateSpeed(-1); return String(root.config.animateSpeed) }
     function near(): string { root.setMode("near"); return "near" }
     function noExpand(): string { root.setMode("off"); return "off" }
     function width(value: string): string { root.setWidthMultiplier(Number(value)); return String(root.config.widthMultiplier) }
@@ -707,12 +950,25 @@ Item {
     function widthDown(): string { root.stepWidth(-1); return String(root.config.widthMultiplier) }
     function heightUp(): string { root.stepHeight(1); return String(root.config.heightMultiplier) }
     function heightDown(): string { root.stepHeight(-1); return String(root.config.heightMultiplier) }
+    function collapseSize(value: string): string { root.setCollapseSize(Number(value)); return String(root.config.collapseSize) }
+    function collapseSizeUp(): string { root.stepCollapseSize(1); return String(root.config.collapseSize) }
+    function collapseSizeDown(): string { root.stepCollapseSize(-1); return String(root.config.collapseSize) }
     function hoverDelay(value: string): string { root.setHoverDelay(Number(value)); return String(root.config.hoverDelay) }
     function hoverDelayUp(): string { root.stepHoverDelay(1); return String(root.config.hoverDelay) }
     function hoverDelayDown(): string { root.stepHoverDelay(-1); return String(root.config.hoverDelay) }
     function fullscreenDelay(value: string): string { root.setFullscreenDelay(Number(value)); return String(root.config.fullscreenDelay) }
     function fullscreenDelayUp(): string { root.stepFullscreenDelay(1); return String(root.config.fullscreenDelay) }
     function fullscreenDelayDown(): string { root.stepFullscreenDelay(-1); return String(root.config.fullscreenDelay) }
+    function columns(name: string): string { root.setWorkspaceColumns(name, true); return "on" }
+    function columnsOff(name: string): string { root.setWorkspaceColumns(name, false); return "off" }
+    function columnsToggle(name: string): string {
+      var entry = (root.config.columns || {})[name] || {}
+      root.setWorkspaceColumns(name, !entry.enabled)
+      return entry.enabled ? "off" : "on"
+    }
+    function openVertical(name: string): string { root.setWorkspaceOpen(name, "vertical"); return "vertical" }
+    function openHorizontal(name: string): string { root.setWorkspaceOpen(name, "horizontal"); return "horizontal" }
+    function workspaces(): string { return JSON.stringify(root.workspaceRows) }
     function refresh(): string {
       if (root.lastHandledAddress) root.requestRefresh(root.lastHandledAddress)
       else snapshotProbe.running = true

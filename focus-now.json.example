@@ -4,9 +4,24 @@
   "expandMode": "near",
   "widthMultiplier": 0.85,
   "heightMultiplier": 0.85,
+  "collapseSize": 57,
   "hoverDelay": 120,
   "fullscreenDelay": 5000,
   "includeFloating": false,
   "stickyFullscreen": false,
-  "mouseRefocus": false
+  "mouseRefocus": false,
+  "animate": true,
+  "animateSpeed": 0,
+  "columns": {
+    "2": {
+      "enabled": true,
+      "open": "horizontal",
+      "mode": "columns"
+    },
+    "special:scratchpad": {
+      "enabled": true,
+      "open": "vertical",
+      "mode": "rows"
+    }
+  }
 }

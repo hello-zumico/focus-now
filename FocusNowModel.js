@@ -4,7 +4,11 @@
 var MULTIPLIERS = [0.25, 0.33, 0.4, 0.5, 0.6, 0.67, 0.75, 0.8, 0.85, 0.9, 0.95]
 var EXPAND_MODES = ["off", "fullscreen", "near"]
 var EDGE_TOLERANCE = 24
-var MINIMUM_SIZE = 80
+var COLLAPSE_SIZE_DEFAULT = 57
+var COLLAPSE_SIZE_MIN = 32
+var COLLAPSE_SIZE_MAX = 300
+var COLLAPSE_SIZE_STEP = 5
+var MINIMUM_SIZE = COLLAPSE_SIZE_DEFAULT
 var HOVER_DELAY_DEFAULT = 120
 var HOVER_DELAY_MAX = 2000
 var HOVER_DELAY_STEP = 50
@@ -12,6 +16,11 @@ var FULLSCREEN_DELAY_DEFAULT = 5000
 var FULLSCREEN_DELAY_MIN = 1000
 var FULLSCREEN_DELAY_MAX = 60000
 var FULLSCREEN_DELAY_STEP = 500
+// Expansion animation duration in milliseconds; 0 keeps the compositor's
+// own "windows" leaf speed untouched.
+var ANIMATE_SPEED_DEFAULT = 0
+var ANIMATE_SPEED_MAX = 3000
+var ANIMATE_SPEED_STEP = 50
 
 function parseJson(raw, fallback) {
   var decoded = fallback
@@ -76,6 +85,40 @@ function stepFullscreenDelay(value, direction) {
   return clamp(normalizeFullscreenDelay(value) + (direction < 0 ? -1 : 1) * FULLSCREEN_DELAY_STEP, FULLSCREEN_DELAY_MIN, FULLSCREEN_DELAY_MAX)
 }
 
+function normalizeAnimateSpeed(value) {
+  return clamp(Math.round(numberOr(value, ANIMATE_SPEED_DEFAULT)), 0, ANIMATE_SPEED_MAX)
+}
+
+function stepAnimateSpeed(value, direction) {
+  return clamp(normalizeAnimateSpeed(value) + (direction < 0 ? -1 : 1) * ANIMATE_SPEED_STEP, 0, ANIMATE_SPEED_MAX)
+}
+
+function normalizeCollapseSize(value) {
+  return clamp(Math.round(numberOr(value, COLLAPSE_SIZE_DEFAULT)), COLLAPSE_SIZE_MIN, COLLAPSE_SIZE_MAX)
+}
+
+function stepCollapseSize(value, direction) {
+  return clamp(normalizeCollapseSize(value) + (direction < 0 ? -1 : 1) * COLLAPSE_SIZE_STEP, COLLAPSE_SIZE_MIN, COLLAPSE_SIZE_MAX)
+}
+
+// Per-workspace columns-layout options keyed by workspace name
+// ("2", "special:scratchpad"). Each entry: { enabled, open:"horizontal"|"vertical" }.
+function normalizeColumns(source) {
+  var result = {}
+  if (!source || typeof source !== "object" || Array.isArray(source)) return result
+  for (var name in source) {
+    if (typeof name !== "string" || !name) continue
+    var entry = source[name]
+    if (!entry || typeof entry !== "object") continue
+    result[name] = {
+      enabled: !!entry.enabled,
+      open: entry.open === "vertical" ? "vertical" : "horizontal",
+      mode: entry.mode === "rows" ? "rows" : "columns"
+    }
+  }
+  return result
+}
+
 function normalizeConfig(raw) {
   var source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
   var expandMode = EXPAND_MODES.indexOf(source.expandMode) >= 0 ? source.expandMode : "near"
@@ -85,11 +128,15 @@ function normalizeConfig(raw) {
     expandMode: expandMode,
     widthMultiplier: nearestMultiplier(source.widthMultiplier, 0.85),
     heightMultiplier: nearestMultiplier(source.heightMultiplier, 0.85),
+    collapseSize: normalizeCollapseSize(source.collapseSize),
+    columns: normalizeColumns(source.columns),
     hoverDelay: normalizeHoverDelay(source.hoverDelay),
     fullscreenDelay: normalizeFullscreenDelay(source.fullscreenDelay),
     includeFloating: !!source.includeFloating,
     stickyFullscreen: !!source.stickyFullscreen,
     mouseRefocus: !!source.mouseRefocus,
+    animate: source.animate !== false,
+    animateSpeed: normalizeAnimateSpeed(source.animateSpeed),
     bins: {
       node: absolutePath(source.nodePath),
       hyprctl: absolutePath(source.hyprctlPath),
@@ -160,16 +207,17 @@ function monitorMeta(monitor) {
     x2: numberOr(reserved[2], 0),
     y2: numberOr(reserved[3], 0)
   }
-  var area = {
-    x: numberOr(monitor.x, 0) + inset.x1,
-    y: numberOr(monitor.y, 0) + inset.y1,
-    w: numberOr(monitor.width, 0) - inset.x1 - inset.x2,
-    h: numberOr(monitor.height, 0) - inset.y1 - inset.y2
-  }
+  // Monitor positions and reserved edges are in logical (post-scale) units;
+  // only the pixel size needs dividing.
   return {
     id: numberOr(monitor.id, -1),
     focused: !!monitor.focused,
-    wa: { x: area.x / scale, y: area.y / scale, w: area.w / scale, h: area.h / scale }
+    wa: {
+      x: numberOr(monitor.x, 0) + inset.x1,
+      y: numberOr(monitor.y, 0) + inset.y1,
+      w: numberOr(monitor.width, 0) / scale - inset.x1 - inset.x2,
+      h: numberOr(monitor.height, 0) / scale - inset.y1 - inset.y2
+    }
   }
 }
 
@@ -234,7 +282,12 @@ var overlapAmount = function(a1, a2, b1, b2) {
 }
 
 function intervalFor(win, axis) {
-  return axis === "x" ? [win.x, win.x + win.w] : [win.y, win.y + win.h]
+  var lo = axis === "x" ? win.x : win.y
+  var span = axis === "x" ? win.w : win.h
+  // A degenerate (negative-size) window inverts its range — normalize so it
+  // still overlaps the neighbors it is squeezed against instead of dropping
+  // out of clustering entirely.
+  return span < 0 ? [lo + span, lo] : [lo, lo + span]
 }
 
 function clusterStrips(windows, axis) {
@@ -274,18 +327,15 @@ function axisPool(focused, windows, axis) {
   var focusedRange = axis === "x" ? [focused.y, focused.y + focused.h] : [focused.x, focused.x + focused.w]
   for (var i = 0; i < windows.length; i++) {
     var range = intervalFor(windows[i], axis === "x" ? "y" : "x")
-    if (overlapAmount(focusedRange[0], focusedRange[1], range[0], range[1]) > EDGE_TOLERANCE) result.push(windows[i])
+    // Any positive perpendicular overlap puts a window in the pool: squeezed
+    // members under the edge threshold are exactly the ones that need ops.
+    if (overlapAmount(focusedRange[0], focusedRange[1], range[0], range[1]) > 0) result.push(windows[i])
   }
   return result
 }
 
-function minDim(mon, axis) {
-  var area = mon ? mon.wa : null
-  var basis = axis === "x"
-    ? (area && area.w > 0 ? area.w : 1920)
-    : (area && area.h > 0 ? area.h : 1080)
-  var floor = Math.round(basis / 20)
-  return floor < MINIMUM_SIZE ? MINIMUM_SIZE : floor
+function minDim(mon, axis, collapseSize) {
+  return collapseSize !== undefined ? normalizeCollapseSize(collapseSize) : MINIMUM_SIZE
 }
 
 function workAreaDim(mon, axis, fallback) {
@@ -294,22 +344,76 @@ function workAreaDim(mon, axis, fallback) {
   return mon.wa.h > 0 ? mon.wa.h : fallback
 }
 
-function distributeRemaining(strips, remainder, minimum) {
-  var result = new Array(strips.length).fill(minimum)
-  var spare = remainder - minimum * strips.length
+function minWindowsSpan(windows, axis, minimum) {
+  if (!windows || windows.length <= 1) return minimum
+  var subStrips = clusterStrips(windows, axis)
+  if (subStrips.length > 1) {
+    var gapSum = 0
+    for (var g = 1; g < subStrips.length; g++) {
+      gapSum += Math.max(0, subStrips[g].a1 - subStrips[g - 1].a2)
+    }
+    var subTotal = gapSum
+    for (var s = 0; s < subStrips.length; s++) {
+      subTotal += minWindowsSpan(subStrips[s].windows, axis, minimum)
+    }
+    return subTotal
+  }
+  var perpAxis = axis === "x" ? "y" : "x"
+  var bands = clusterStrips(windows, perpAxis)
+  if (bands.length <= 1) return minimum
+  var widest = minimum
+  for (var b = 0; b < bands.length; b++) {
+    widest = Math.max(widest, minWindowsSpan(bands[b].windows, axis, minimum))
+  }
+  return widest
+}
+
+function distributeRemaining(strips, remainder, minimums) {
+  var result = Array.isArray(minimums) ? minimums.slice() : new Array(strips.length).fill(minimums)
+  var minSum = result.reduce(function(sum, value) { return sum + value }, 0)
+  var spare = remainder - minSum
   if (!(spare > 0)) return result
-  var weights = strips.map(function(strip) { return Math.max(1, strip.a2 - strip.a1) })
-  var totalWeight = weights.reduce(function(sum, value) { return sum + value }, 0)
   var assigned = 0
   for (var i = 0; i < strips.length; i++) {
-    var share = i === strips.length - 1 ? spare - assigned : Math.round(spare * weights[i] / totalWeight)
+    var share = i === strips.length - 1 ? spare - assigned : Math.round(spare / strips.length)
     result[i] += share
     assigned += share
   }
   return result
 }
 
-function axisTargets(focused, windows, mon, axis, multiplier) {
+function assignStripTargets(windows, axis, span, minimum, out) {
+  if (!windows || !windows.length) return
+  var subStrips = clusterStrips(windows, axis)
+  if (subStrips.length > 1) {
+    var gapSum = 0
+    for (var g = 1; g < subStrips.length; g++) {
+      gapSum += Math.max(0, subStrips[g].a1 - subStrips[g - 1].a2)
+    }
+    var subMins = subStrips.map(function(sub) { return minWindowsSpan(sub.windows, axis, minimum) })
+    var subShares = distributeRemaining(subStrips, Math.max(0, span - gapSum), subMins)
+    for (var s = 0; s < subStrips.length; s++) {
+      assignStripTargets(subStrips[s].windows, axis, subShares[s], minimum, out)
+    }
+    return
+  }
+  var perpAxis = axis === "x" ? "y" : "x"
+  var bands = clusterStrips(windows, perpAxis)
+  if (bands.length > 1) {
+    for (var b = 0; b < bands.length; b++) {
+      assignStripTargets(bands[b].windows, axis, span, minimum, out)
+    }
+    return
+  }
+  for (var j = 0; j < windows.length; j++) {
+    var address = windows[j].address
+    if (!out[address]) out[address] = {}
+    if (axis === "x") out[address].w = span
+    else out[address].h = span
+  }
+}
+
+function axisTargets(focused, windows, mon, axis, multiplier, collapseSize) {
   var pool = axisPool(focused, windows, axis)
   var strips = clusterStrips(pool, axis)
   if (!strips.length) return {}
@@ -321,25 +425,34 @@ function axisTargets(focused, windows, mon, axis, multiplier) {
 
   var currentSpan = strips.reduce(function(sum, strip) { return sum + strip.a2 - strip.a1 }, 0)
   var workArea = workAreaDim(mon, axis, currentSpan)
-  var minimum = minDim(mon, axis)
-  var total = strips.length === 1 ? workArea : Math.max(currentSpan, strips.length * minimum)
+  var minimum = minDim(mon, axis, collapseSize)
+  var stripMins = strips.map(function(strip) { return minWindowsSpan(strip.windows, axis, minimum) })
+  var minSum = stripMins.reduce(function(sum, value) { return sum + value }, 0)
+  var focusedMin = stripMins[focusedIndex]
+  var otherMins = stripMins.filter(function(_, index) { return index !== focusedIndex })
+  var otherMinSum = minSum - focusedMin
+  var total = strips.length === 1 ? workArea : Math.max(currentSpan, minSum)
   var focusedTarget = strips.length === 1
     ? Math.round(total)
-    : Math.round(clamp(total * multiplier, minimum, Math.max(minimum, total - (strips.length - 1) * minimum)))
+    : Math.round(clamp(total * multiplier, focusedMin, Math.max(focusedMin, total - otherMinSum)))
   var shares = strips.length === 1 ? [] : distributeRemaining(
     strips.filter(function(_, index) { return index !== focusedIndex }),
     total - focusedTarget,
-    minimum
+    otherMins
   )
   var result = {}
   var shareIndex = 0
   for (i = 0; i < strips.length; i++) {
     var target = i === focusedIndex ? focusedTarget : shares[shareIndex++]
-    for (var j = 0; j < strips[i].windows.length; j++) {
-      var address = strips[i].windows[j].address
-      if (!result[address]) result[address] = {}
-      if (axis === "x") result[address].w = target
-      else result[address].h = target
+    if (i === focusedIndex) {
+      for (var j = 0; j < strips[i].windows.length; j++) {
+        var address = strips[i].windows[j].address
+        if (!result[address]) result[address] = {}
+        if (axis === "x") result[address].w = target
+        else result[address].h = target
+      }
+    } else {
+      assignStripTargets(strips[i].windows, axis, target, minimum, result)
     }
   }
   return result
@@ -363,8 +476,8 @@ function layoutTargets(focused, byAddress, monitors, cfg) {
   if (!windows.length) return {}
   var monitor = monitorForWindow(focused, monitors)
   return mergeTargets(
-    axisTargets(focused, windows, monitor, "x", cfg.widthMultiplier),
-    axisTargets(focused, windows, monitor, "y", cfg.heightMultiplier)
+    axisTargets(focused, windows, monitor, "x", cfg.widthMultiplier, cfg.collapseSize),
+    axisTargets(focused, windows, monitor, "y", cfg.heightMultiplier, cfg.collapseSize)
   )
 }
 
@@ -380,6 +493,15 @@ function largestSpanFirst(windows, axis) {
   })
 }
 
+var MAX_GROW_STEP = 320
+var MAX_SHRINK_STEP = 900
+
+function stepDelta(rawChange, direction) {
+  var limit = rawChange >= 0 ? MAX_GROW_STEP : MAX_SHRINK_STEP
+  var capped = Math.max(-limit, Math.min(limit, rawChange))
+  return capped * direction
+}
+
 function axisResizeOps(focused, windows, axis, targets) {
   var strips = clusterStrips(axisPool(focused, windows, axis), axis)
   var ops = []
@@ -393,7 +515,7 @@ function axisResizeOps(focused, windows, axis, targets) {
   if (strips.length > 1 && focusedTarget) {
     var wanted = axis === "x" ? focusedTarget.w : focusedTarget.h
     var current = axis === "x" ? focused.w : focused.h
-    var delta = ((wanted || current) - current) * resizeDirection(focusedIndex, strips.length - 1)
+    var delta = stepDelta((wanted || current) - current, resizeDirection(focusedIndex, strips.length - 1))
     if (Math.abs(delta) > 2) ops.push(axis === "x"
       ? { address: focused.address, dx: delta, dy: 0, candidate: 0 }
       : { address: focused.address, dx: 0, dy: delta, candidate: 0 })
@@ -410,7 +532,7 @@ function axisResizeOps(focused, windows, axis, targets) {
       if (!target) continue
       wanted = axis === "x" ? target.w : target.h
       current = axis === "x" ? win.w : win.h
-      delta = ((wanted || current) - current) * direction
+      delta = stepDelta((wanted || current) - current, direction)
       if (Math.abs(delta) <= 2) continue
       ops.push(axis === "x"
         ? { address: win.address, dx: delta, dy: 0, candidate: candidate + j }
@@ -451,11 +573,12 @@ function floatingTarget(focused, monitors, cfg) {
   var monitor = monitorForWindow(focused, monitors)
   var area = monitor && monitor.wa
   if (!focused || !area || area.w <= 0 || area.h <= 0) return null
+  var minimum = minDim(monitor, "x", cfg && cfg.collapseSize)
   return {
     x: area.x,
     y: area.y,
-    w: Math.max(MINIMUM_SIZE, Math.round(area.w * cfg.widthMultiplier)),
-    h: Math.max(MINIMUM_SIZE, Math.round(area.h * cfg.heightMultiplier)),
+    w: Math.max(minimum, Math.round(area.w * cfg.widthMultiplier)),
+    h: Math.max(minimum, Math.round(area.h * cfg.heightMultiplier)),
     wa: area
   }
 }
@@ -506,14 +629,15 @@ function floatingResizeEval(address, box) {
     'hl.dispatch(hl.dsp.window.bring_to_top({ ' + selector + ' }))'
 }
 
-function moveToRootEval() {
-  return 'hl.dispatch(hl.dsp.layout("movetoroot"))'
-}
-
 function mouseConfigEval(followMouse, refocus) {
   var follow = typeof followMouse === "string" ? followMouse : String(Number(followMouse))
+  // Focus dispatches (keybindings and the plugin's own focus batches) warp the
+  // cursor to the window even with input.mouse_refocus off; cursor.no_warps is
+  // the only switch that suppresses it. The refocus toggle means "the pointer
+  // decides focus", so warps stay off unless it is enabled.
   return 'hl.config({ input = { follow_mouse = ' + follow +
-    ', mouse_refocus = ' + (refocus ? 'true' : 'false') + ' } })'
+    ', mouse_refocus = ' + (refocus ? 'true' : 'false') +
+    ' }, cursor = { no_warps = ' + (refocus ? 'false' : 'true') + ' } })'
 }
 
 function activeWorkspaceFloatsEval() {
@@ -530,7 +654,7 @@ function installHoverBridgeEval(includeFloating, refocus) {
     'bridge.workspace_subscription = nil; bridge.monitor_subscription = nil; bridge.wrapped_workspace_mode = nil',
     'bridge.workspace_mode = type(o) == "table" and o.workspace_mode or nil',
     activeWorkspaceFloatsEval(),
-    'local function apply_hover_focus() hl.timer(function() bridge.restore_follow_mouse = active_workspace_floats() and 0 or hl.get_config("input.follow_mouse"); bridge.restore_mouse_refocus = hl.get_config("input.mouse_refocus"); ' + mouseConfigEval(appliedFollow, refocus) + ' end, { type = "oneshot", timeout = 1 }) end',
+    'local function apply_hover_focus() hl.timer(function() bridge.restore_follow_mouse = active_workspace_floats() and 0 or hl.get_config("input.follow_mouse"); bridge.restore_mouse_refocus = hl.get_config("input.mouse_refocus"); bridge.restore_no_warps = hl.get_config("cursor.no_warps"); ' + mouseConfigEval(appliedFollow, refocus) + ' end, { type = "oneshot", timeout = 1 }) end',
     'if bridge.workspace_mode then bridge.wrapped_workspace_mode = function(spec) local result = bridge.workspace_mode(spec); apply_hover_focus(); return result end; o.workspace_mode = bridge.wrapped_workspace_mode end',
     'bridge.workspace_subscription = hl.on("workspace.active", apply_hover_focus)',
     'bridge.monitor_subscription = hl.on("monitor.focused", apply_hover_focus)',
@@ -548,8 +672,10 @@ function uninstallHoverBridgeEval(followMouse, refocus) {
     'if bridge and tonumber(bridge.restore_follow_mouse) ~= nil then restore_follow = tonumber(bridge.restore_follow_mouse) elseif active_workspace_floats() then restore_follow = 0 end',
     'local restore_refocus = ' + (refocus ? 'true' : 'false'),
     'if bridge and bridge.restore_mouse_refocus ~= nil then restore_refocus = bridge.restore_mouse_refocus end',
+    'local restore_warps = false',
+    'if bridge and bridge.restore_no_warps ~= nil then restore_warps = bridge.restore_no_warps end',
     'rawset(_G, "focus_now_hover_bridge", nil)',
-    'hl.config({ input = { follow_mouse = restore_follow, mouse_refocus = restore_refocus } })'
+    'hl.config({ input = { follow_mouse = restore_follow, mouse_refocus = restore_refocus }, cursor = { no_warps = restore_warps } })'
   ].join('; ')
 }
 
@@ -665,10 +791,22 @@ function clearAllManagedFullscreenEval() {
     'end'
 }
 
+// The JS-side onlyWindow check runs on a clients snapshot that can lag the
+// compositor by a frame: a newly mapped sibling may be absent from it, and
+// the maximize then wrongly applies to a window that is not actually alone
+// (the fullscreen take-over churn where a fresh window opens maximized).
+// Re-count the workspace's live tiled windows inside the eval, atomically
+// with the dispatch, so a stale snapshot can never trigger it.
 function setManagedMaximizedEval(address) {
   return 'local target = nil; for _, w in ipairs(hl.get_windows()) do ' +
     'if w.address == "' + String(address) + '" then target = w break end end; ' +
-    'if target then hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 1, client = 1, window = "address:" .. target.address })) end'
+    'if target and target.workspace then ' +
+      'local siblings = 0; ' +
+      'for _, w in ipairs(hl.get_workspace_windows(tostring(target.workspace.id)) or {}) do ' +
+        'if w.mapped ~= false and not w.floating then siblings = siblings + 1 end ' +
+      'end; ' +
+      'if siblings <= 1 then hl.dispatch(hl.dsp.window.fullscreen_state({ internal = 1, client = 1, window = "address:" .. target.address })) end ' +
+    'end'
 }
 
 function setManagedFullscreenEval(address) {
@@ -686,14 +824,20 @@ if (typeof module !== "undefined") {
   module.exports = {
     MULTIPLIERS: MULTIPLIERS,
     EXPAND_MODES: EXPAND_MODES,
+    MINIMUM_SIZE: MINIMUM_SIZE,
     parseJson: parseJson,
     numberOr: numberOr,
     nearestMultiplier: nearestMultiplier,
     stepMultiplier: stepMultiplier,
     normalizeHoverDelay: normalizeHoverDelay,
     stepHoverDelay: stepHoverDelay,
+    normalizeAnimateSpeed: normalizeAnimateSpeed,
+    stepAnimateSpeed: stepAnimateSpeed,
     normalizeFullscreenDelay: normalizeFullscreenDelay,
     stepFullscreenDelay: stepFullscreenDelay,
+    normalizeCollapseSize: normalizeCollapseSize,
+    stepCollapseSize: stepCollapseSize,
+    normalizeColumns: normalizeColumns,
     normalizeConfig: normalizeConfig,
     windowMeta: windowMeta,
     parseClients: parseClients,
@@ -707,6 +851,7 @@ if (typeof module !== "undefined") {
     workspaceWindows: workspaceWindows,
     overlapAmount: overlapAmount,
     clusterStrips: clusterStrips,
+    minWindowsSpan: minWindowsSpan,
     axisPool: axisPool,
     axisTargets: axisTargets,
     layoutTargets: layoutTargets,
@@ -721,7 +866,6 @@ if (typeof module !== "undefined") {
     resizeCommand: resizeCommand,
     resizeEval: resizeEval,
     floatingResizeEval: floatingResizeEval,
-    moveToRootEval: moveToRootEval,
     mouseConfigEval: mouseConfigEval,
     activeWorkspaceFloatsEval: activeWorkspaceFloatsEval,
     installHoverBridgeEval: installHoverBridgeEval,

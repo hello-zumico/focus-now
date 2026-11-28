@@ -5,6 +5,11 @@
   "status.fullscreen": "Fullscreen on focus",
   "status.near": "Near full · %1 × %2",
   "section.behavior": "Behavior",
+  "tab.expansion": "Expansion",
+  "tab.workspaces": "Workspaces",
+  "ws.off": "Off",
+  "ws.columns": "Columns",
+  "ws.rows": "Rows",
   "behavior.fullscreen": "Fullscreen",
   "behavior.fullscreen.hint": "Focused windows cover the screen until you hover elsewhere. Fullscreen you set yourself is never touched.",
   "behavior.sticky": "Sticky fullscreen",
@@ -32,5 +37,11 @@
   "bar.tooltipOn": "Focus Now on",
   "bar.tooltipOff": "Focus Now off",
   "behavior.refocus": "Warp pointer on focus",
-  "behavior.refocus.hint": "Move the pointer to the center of a window focused without mouse input (keybinds, menus). Off prevents cursor jumps inside apps."
+  "behavior.refocus.hint": "Move the pointer to the center of a window focused without mouse input (keybinds, menus). Off prevents cursor jumps inside apps.",
+  "ws.desc": "Pre-set the layout for each workspace on this monitor — including ones with no windows yet. Tiling is the normal split; under it, Mix expands the focused window and shrinks the rest to your collapse size, while Columns and Rows arrange every window in that direction. Scrolling and Floating use omarchy's own workspace modes.",
+  "ws.tiling": "Tiling",
+  "ws.scrolling": "Scrolling",
+  "ws.floating": "Floating",
+  "ws.mix": "Mix",
+  "ws.special": "Special workspaces"
 }

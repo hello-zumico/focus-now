@@ -7,7 +7,7 @@ const Model = require(path.join(__dirname, "FocusNowModel.js"))
 
 const [address, widthValue, heightValue, floatingValue, centerValue, hyprctlPath,
   priorAddress, priorMode, requestedMode, stickyValue, collapseValue,
-  animateValue, animateSpeedValue] = process.argv.slice(2)
+  animateValue, animateSpeedValue, releaseValue] = process.argv.slice(2)
 const requestedAddress = String(address || "")
 const hyprctl = String(hyprctlPath || "/usr/bin/hyprctl")
 const expandMode = String(requestedMode || "near")
@@ -17,11 +17,15 @@ const animateLayout = animateValue !== "0"
 const animateSpeedMs = Model.normalizeAnimateSpeed(animateSpeedValue)
 const previousAddress = String(priorAddress || "")
 const previousMode = String(priorMode || "")
+// release=1: the pointer sits off every window (bar/desktop) — freeze the
+// layout exactly as it is; the last focused window keeps its expansion.
+const releaseLayout = releaseValue === "1"
 const options = {
   widthMultiplier: Model.nearestMultiplier(Number(widthValue), 0.85),
   heightMultiplier: Model.nearestMultiplier(Number(heightValue), 0.85),
   collapseSize: Model.normalizeCollapseSize(collapseValue),
-  includeFloating
+  includeFloating,
+  release: releaseLayout
 }
 
 if (!requestedAddress || !hyprctl) process.exit(0)
@@ -294,6 +298,11 @@ function applyScrollingMode() {
     'if target and target.workspace and target.workspace.tiled_layout == "scrolling" then ' +
     ops.join('; ') + ' end'
   )
+  const expanded = snapshot()[requestedAddress]
+  if (expanded && wa && (expanded.x < wa.x + gaps[3] || expanded.x + expanded.w > wa.x + wa.w - gaps[1])) {
+    lua('local w = hl.get_active_window(); if w and w.address == "' + requestedAddress +
+      '" then hl.dispatch(hl.dsp.layout("center")) end')
+  }
 }
 
 function workspaceFingerprint(clients) {
@@ -396,6 +405,25 @@ function trace(msg) {
   } catch (_) {}
 }
 
+// Pin memory: the last resize target each window was dispatched per
+// workspace + window set. Dwindle delivers absolute resizes through split
+// ratios with clamps, so a pinned leaf often lands off target — re-pinning
+// the same target every apply then rewrites a shared ratio and disturbs
+// siblings, which is the oscillation. A target attempted once is attempted
+// never again (until focus or the window set changes the targets): residue
+// stays put, user resizes stand, and repeat applies go silent.
+const PINS_PATH = "/tmp/focus-now-pins.json"
+function readPins() {
+  try {
+    return Model.parseJson(fs.readFileSync(PINS_PATH, "utf8"), {}) || {}
+  } catch (_) {
+    return {}
+  }
+}
+function writePins(all) {
+  try { fs.writeFileSync(PINS_PATH, JSON.stringify(all)) } catch (_) {}
+}
+
 // Multiple apply.js invocations overlap (one per service event). Concurrent
 // runs interleave dispatches and race the cooldown files — a repair pass in
 // one run gets flipped back by the next run before its mark lands. Serialize
@@ -457,9 +485,12 @@ function rescueNegatives(target, clients) {
     if (!win || win.floating || win.address === target.address) continue
     if (String(win.workspaceId) !== ws) continue
     // Absolute resizes land exactly — a relative grow on a right/bottom
-    // child can answer with a shrink and spiral into more negatives.
-    const nw = win.w < FLOOR_GUARD ? options.collapseSize : 0
-    const nh = win.h < FLOOR_GUARD ? options.collapseSize : 0
+    // child can answer with a shrink and spiral into more negatives. The
+    // damage floor is DAMAGE_SIZE, not FLOOR_GUARD: pins legitimately
+    // deliver a few px under target through gap pads, and treating that
+    // residue as damage re-shrinks the leaf every apply — a rebound.
+    const nw = win.w < DAMAGE_SIZE ? options.collapseSize : 0
+    const nh = win.h < DAMAGE_SIZE ? options.collapseSize : 0
     if (nw || nh) damaged.push([address, nw || win.w, nh || win.h])
   }
   if (!damaged.length) return false
@@ -471,24 +502,24 @@ function rescueNegatives(target, clients) {
   } catch (_) {
     return false
   }
-  // Still degenerate after both signs? The window lives inside a broken
-  // subtree whose seams can't be moved without wrecking the other axis —
-  // reparent it to the root split, where the next pass resizes it cleanly.
-  const stuck = []
-  for (const [address] of damaged) {
-    const win = snapshot()[address]
-    if (win && (win.w < FLOOR_GUARD || win.h < FLOOR_GUARD)) stuck.push(address)
-  }
-  if (stuck.length) {
-    const cmds = []
-    for (const address of stuck) {
-      cmds.push('hl.dispatch(hl.dsp.focus({ window = "address:' + address + '" }))')
-      cmds.push('hl.dispatch(hl.dsp.layout("movetoroot"))')
-    }
-    cmds.push('hl.dispatch(hl.dsp.focus({ window = "address:' + requestedAddress + '" }))')
+  // A leaf still at-or-under the floor after its absolute reset is wedged
+  // under a collapsed split — no resize reaches it, and "never hidden"
+  // outranks avoiding a bounded restructure. Reparent it to root, one
+  // leaf per apply, throttled so a persistently unfixable tree cannot
+  // turn into a shuffle loop. The budget is spec-scoped: a wedge that
+  // survives a few reparents is a tree shape problem, not a leaf problem.
+  if ((options._rescN || 0) > 3) return true
+  const stuck = snapshot()
+  for (const [a] of damaged) {
+    const w = stuck[a]
+    if (!w || (w.w >= DAMAGE_SIZE && w.h >= DAMAGE_SIZE)) continue
+    if (cooledRecently(MOVEROOT_COOLDOWN_PATH, a, 30000)) continue
+    markCooled(MOVEROOT_COOLDOWN_PATH, [a])
+    trace("MOVEROOT " + a.slice(-6))
     try {
-      lua(cmds.join("; "))
+      lua('hl.dispatch(hl.dsp.focus({ window = "address:' + a + '" })); hl.dispatch(hl.dsp.layout("movetoroot")); hl.dispatch(hl.dsp.focus({ window = "address:' + target.address + '" }))')
     } catch (_) {}
+    break
   }
   return true
 }
@@ -603,9 +634,9 @@ function combGeom(clients, wsId) {
 // region cannot be opened leaf-by-leaf — movetoroot on just the focused
 // window collapses its ex-mates into degenerate nodes. Reparenting EVERY
 // window to the root produces a flat comb where every seam is reachable.
-function flattenWorkspaceTree(target, why) {
+function flattenWorkspaceTree(target, why, force) {
   const ws = String(target.workspaceId)
-  if (cooledRecently(FLATTEN_COOLDOWN_PATH, ws, FLATTEN_COOLDOWN_MS)) return false
+  if (!force && cooledRecently(FLATTEN_COOLDOWN_PATH, ws, FLATTEN_COOLDOWN_MS)) return false
   markCooled(FLATTEN_COOLDOWN_PATH, [ws])
   trace("FLATTEN ws" + ws + " " + why)
   const snap = snapshot()
@@ -620,6 +651,68 @@ function flattenWorkspaceTree(target, why) {
   cmds.push('hl.dispatch(hl.dsp.focus({ window = "address:' + requestedAddress + '" }))')
   try {
     lua(cmds.join("; "))
+    return true
+  } catch (_) { return false }
+}
+
+// When the comb axis cannot fit every sibling's minimum share plus the
+// focused window's floor, the column tail always starves one leaf into a
+// hidden zero-size box — no resize reaches it, and dwindle topology
+// surgery (movetoroot/togglesplit chains) just relocates the wedge: the
+// root split orientation is fixed, so restructures re-columize whatever
+// they move. The flat rows layout IS the band arrangement — every leaf a
+// full-width strip, collapse on the height axis where the same sibling
+// count fits trivially — and it owns exact geometry instead of clamped
+// ratios, so collapseSize is delivered rather than approximated. This is
+// the only arrangement that delivers collapseSize with zero hidden
+// windows at high window counts.
+function shellConfigPath() {
+  try {
+    const out = spawnSync("pgrep", ["-af", "quickshell"], { encoding: "utf8" }).stdout || ""
+    const m = out.match(/-p\s+(\S+)/)
+    if (m) return m[1]
+  } catch (_) {}
+  return "/usr/share/omarchy/shell"
+}
+
+// Persist mode="rows" into the workspace's config entry, the same write
+// the panel's mode chip performs. Without it the service's reconcile sees
+// the configured "mix"/dwindle preset and re-asserts dwindle over the
+// emitted lua:rows rule.
+function persistRowsMode(ws) {
+  try {
+    const cfgPath = (process.env.HOME || "") + "/.config/omarchy/focus-now.json"
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"))
+    const cols = cfg.columns || (cfg.columns = {})
+    const entry = cols[ws] || {}
+    entry.enabled = true
+    entry.base = "dwindle"
+    entry.mode = "rows"
+    if (!entry.open) entry.open = "vertical"
+    cols[ws] = entry
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n")
+  } catch (_) {}
+}
+
+function bandNormalize(target, why) {
+  const ws = String(target.workspaceId)
+  const rec = workspaceRecord(target)
+  const wsName = rec && rec.name ? String(rec.name) : ws
+  trace("BANDNORM ws" + ws + " " + why)
+  // The service's own mode setter writes mode=rows into focus-now.json and
+  // emits the lua:rows workspace rule under its transition hold. It is a
+  // quickshell IPC, spawned through hl.exec_cmd so it stays on the eval
+  // channel — a direct spawn would bypass the test harness's hyprctl mock.
+  const ipc = ["qs", "-p", shellConfigPath(), "ipc", "call", "focus-now",
+    "workspaceMode", wsName, "rows"]
+    .map(a => "'" + String(a).replace(/'/g, "'\\''") + "'").join(" ")
+  try {
+    lua('hl.exec_cmd(' + JSON.stringify(ipc) + ')')
+    return true
+  } catch (_) {}
+  try {
+    lua('hl.workspace_rule({ workspace = ' + JSON.stringify(wsName) + ', layout = "lua:rows" })')
+    persistRowsMode(wsName)
     return true
   } catch (_) { return false }
 }
@@ -835,9 +928,18 @@ function reorientOversizedSlivers(target, clients, preClients) {
       return ox1 < wx2 && ox2 > wx1 && (oy1 >= wy2 || oy2 <= wy1)
     })
     const parentAxis = hasXSibling ? "x" : (hasYSibling ? "y" : null)
+    // A flip is only ever a fix when the leaf's orientation mismatches its
+    // parent split: a column trapped inside a stacked (y-split) region, or a
+    // band trapped inside a side-by-side (x-split) one. A column under an
+    // x-split or a band under a y-split is already a correctly-oriented comb
+    // member — flipping it re-nests it into a shared region the seam ops can
+    // no longer reach, which is exactly the wedge the repair ladder then has
+    // to flatten. Wrong size alone is convergence residue, not misorientation.
+    const misoriented = column ? parentAxis === "y" : (band && parentAxis === "x")
+    if (!misoriented) continue
     // Two candidates sharing one parent split (a nested pair) would each
     // rotate the same node — the second flip undoes the first.
-    const parent = parentAxis ? leafParentNode(address, parentAxis, addresses) : null
+    const parent = leafParentNode(address, parentAxis, addresses)
     if (parent) {
       const parentKey = parentAxis + ":" + parent.node.lo + ":" + parent.node.hi + ":" + parent.node.seam
       if (flippedParents[parentKey]) continue
@@ -848,7 +950,7 @@ function reorientOversizedSlivers(target, clients, preClients) {
       // oversized windows stay restricted to leaf siblings.
       const sibling = parent.left ? parent.node.right : parent.node.left
       if (!damaged && !(sibling && sibling.leaf !== undefined)) continue
-    } else if (!damaged && !parentAxis) continue
+    }
     trace("REORIENT " + address.slice(-6) + " " + win.w + "x" + win.h +
           (column ? " col" : " band") + (damaged ? " damaged" : "") +
           " pax=" + parentAxis)
@@ -1079,53 +1181,12 @@ function writeAnimSpeedState(value) {
   try { fs.writeFileSync(ANIM_SPEED_STATE, String(value)) } catch (_) {}
 }
 
-// The last `hl.animation({ ... leaf = "name" ... })` literal in the config
-// sources — Omarchy defaults first, user files last so their definitions win.
-// Used to restore the windowsMove leaf to the user's own settings.
-function configuredAnimationLeaf(leaf) {
-  const roots = ["/usr/share/omarchy/default/hypr",
-                 (process.env.HOME || "") + "/.config/hypr"]
-  const files = []
-  const walk = (dir, out) => {
-    let entries = []
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch (_) { return }
-    for (const e of entries) {
-      const p = dir + "/" + e.name
-      if (e.isDirectory()) walk(p, out)
-      else if (e.name.endsWith(".lua")) out.push(p)
-    }
-  }
-  for (const dir of roots) {
-    const local = []
-    walk(dir, local)
-    local.sort()
-    files.push(...local)
-  }
-  const re = new RegExp("hl\\.animation\\s*\\(\\s*\\{[^\\}]*leaf\\s*=\\s*\"" + leaf + "\"[^\\}]*\\}", "g")
-  let found = null
-  for (const file of files) {
-    let text = ""
-    try { text = fs.readFileSync(file, "utf8") } catch (_) { continue }
-    let m
-    while ((m = re.exec(text))) found = m[0]
-  }
-  return found
-}
-
-// animateSpeed=0 means "the compositor's own speed" — restore windowsMove to
-// what the user's config declares (their own leaf, else the windows parent
-// leaf cloned, else nothing). Runtime leaf overrides can't be undefined, so
-// re-emitting the declared definition is the closest true revert.
+// animateSpeed=0 means "the compositor's own speed" — a runtime leaf override
+// can only be truly removed by re-evaluating the config (re-emitting the
+// parent's definition would pin the leaf instead of letting it inherit), so
+// reload. hyprctl returns before the reload runs, so the apply is unaffected.
 function revertWindowsMoveLeaf() {
-  const own = configuredAnimationLeaf("windowsMove")
-  if (own) {
-    try { lua(own) } catch (_) {}
-    return
-  }
-  const parent = configuredAnimationLeaf("windows")
-  if (parent) {
-    try { lua(parent.replace(/leaf\s*=\s*"windows"/, 'leaf = "windowsMove"')) } catch (_) {}
-  }
+  try { call(["reload"]); return true } catch (_) { return false }
 }
 
 function stripRep(strip, axis) {
@@ -1791,7 +1852,7 @@ function applyExactDwindle(initialClients) {
   let failures = 0
   let delivered = false
   let reprobed = false
-  for (let pass = 0; pass < 12; pass++) {
+  for (let pass = 0; pass < 6; pass++) {
     const beforeSizes = {}
     for (const a in clients) { const w = clients[a]; if (w) beforeSizes[a] = w.w + "x" + w.h }
     const res = runExactPass(clients, forceProbe)
@@ -1904,11 +1965,23 @@ function applyLuaColumns(initialClients, layout) {
   // under this provider. It silently fights the flex fill, so neutralize it
   // whenever a columns apply runs (it is a global compositor option).
   lua('hl.config({ layout = { single_window_aspect_ratio = { 0, 0 } } })')
+  if (releaseLayout) {
+    // Freeze: the layout holds the current geometry while the flag drops
+    // incoming geom verbs until the pointer re-enters a window.
+    lua("focus_now_set_hover_release(true)")
+    return true
+  }
   const target = initialClients[requestedAddress]
-  if (!target || active() !== requestedAddress) return false
+  if (!target || active() !== requestedAddress) {
+    trace("FLAT-BAIL " + requestedAddress.slice(-6) + " target=" + !!target + " active=" + String(active()).slice(-6))
+    return false
+  }
   const all = Model.workspaceWindows(initialClients, target, includeFloating)
     .filter(w => w && !w.floating)
-  if (all.length < 2 || !all.some(w => w.address === requestedAddress)) return false
+  if (all.length < 2 || !all.some(w => w.address === requestedAddress)) {
+    trace("FLAT-BAIL " + requestedAddress.slice(-6) + " count=" + all.length)
+    return false
+  }
   const mon = Model.monitorForWindow(target, monitors())
   // The layout's ctx.area is the monitor work area inset by gaps_out.
   // CSS order: top right bottom left.
@@ -1965,7 +2038,10 @@ function applyLuaColumns(initialClients, layout) {
   })
   const focusedIndex = slots.findIndex(s =>
     s.windows.some(w => w.address === requestedAddress))
-  if (focusedIndex < 0) return false
+  if (focusedIndex < 0) {
+    trace("FLAT-BAIL " + requestedAddress.slice(-6) + " no-slot")
+    return false
+  }
 
   const collapse = Math.max(1, options.collapseSize)
   const rects = {}
@@ -2033,7 +2109,7 @@ function applyLuaColumns(initialClients, layout) {
     const y = Math.round(r.y !== undefined ? r.y : w.y)
     const wv = Math.round(r.w !== undefined ? r.w : Math.max(w.w, collapse))
     const hv = Math.round(r.h !== undefined ? r.h : Math.max(w.h, collapse))
-    return w.address + ":" + x + "," + y + "," + Math.max(1, wv) + "," + Math.max(1, hv)
+    return w.address + ":" + x + "," + y + "," + Math.max(collapse, wv) + "," + Math.max(collapse, hv)
   })
   trace("GEOM " + parts.join(" "))
   lua("hl.dispatch(hl.dsp.layout(\"geom " + parts.join(" ") + "\"))")
@@ -2042,6 +2118,45 @@ function applyLuaColumns(initialClients, layout) {
 
 function isFlatLuaLayout(name) {
   return name === "lua:columns" || name === "lua:rows"
+}
+
+// lua:tree is the dwindle emulator: the same geometric planner that drives
+// dwindle produces per-window target SIZES (layoutTargets carries no
+// positions — the tree places them), sent through the "sizes" layoutmsg.
+// The layout solves node ratios from the demands — exact shares, no seam
+// ops, no clamps, no wedges.
+function isLuaManagedLayout(name) {
+  return isFlatLuaLayout(name) || name === "lua:tree"
+}
+
+function applyLuaTree(postClear) {
+  const baseTarget = postClear[requestedAddress]
+  if (!baseTarget) {
+    trace("TREE-BAIL " + requestedAddress.slice(-6) + " no-target")
+    return false
+  }
+  const targets = Model.layoutTargets(baseTarget, postClear, monitors(), options) || {}
+  const wsId = String(baseTarget.workspaceId)
+  const parts = []
+  for (const a in postClear) {
+    const w = postClear[a]
+    if (!w || w.floating || String(w.workspaceId) !== wsId) continue
+    const r = targets[a]
+    // Never emit below collapseSize: falling back to the current size
+    // would lock a window already collapsed past the floor into a
+    // self-perpetuating sliver (0-height in, 1px demand out).
+    const tw = r && r.w > 0 ? r.w : Math.max(options.collapseSize, w.w)
+    const th = r && r.h > 0 ? r.h : Math.max(options.collapseSize, w.h)
+    parts.push(a + ":" + Math.round(Math.max(options.collapseSize, tw)) + ","
+      + Math.round(Math.max(options.collapseSize, th)))
+  }
+  if (!parts.length) {
+    trace("TREE-BAIL " + requestedAddress.slice(-6) + " no-members")
+    return false
+  }
+  trace("SIZES " + parts.join(" "))
+  lua('hl.dispatch(hl.dsp.layout("sizes ' + parts.join(" ") + '"))')
+  return true
 }
 
 function allTargetsReached(clients, targets) {
@@ -2284,33 +2399,24 @@ function computeRepairPending() {
   const postTarget = postCheck[requestedAddress]
   if (!postTarget || postTarget.floating || layoutName(postCheck) !== "dwindle") return false
   const wsId = String(postTarget.workspaceId)
-  const comb = combGeom(postCheck, wsId)
+  // Only real damage (a leaf squeezed under the floor or negative) justifies
+  // a service-driven retry — everything else the retry would "fix" is
+  // cosmetic, and a retry that restructures visible windows is bouncing.
   for (const a in postCheck) {
     const w = postCheck[a]
     if (w && !w.floating && String(w.workspaceId) === wsId &&
-        (w.w < DAMAGE_SIZE || w.h < DAMAGE_SIZE ||
-         (!comb && a !== requestedAddress && Math.min(w.w, w.h) > 90))) return true
+        (w.w < DAMAGE_SIZE || w.h < DAMAGE_SIZE)) return true
   }
-  if (Math.min(postTarget.w, postTarget.h) < 120) return true
-  // Focused window far under its target while a sibling holds the surplus:
-  // still repairable — the next apply can take it.
-  const targets = Model.layoutTargets(postTarget, postCheck, monitors(), options) || {}
-  const want = targets[requestedAddress]
-  const deficit = want ? Math.max(want.w > 0 ? want.w - postTarget.w : 0,
-                                want.h > 0 ? want.h - postTarget.h : 0) : 0
-  if (deficit > 160) {
-    for (const a in postCheck) {
-      const w = postCheck[a], t = targets[a]
-      if (a !== requestedAddress && w && t && !w.floating &&
-          String(w.workspaceId) === wsId &&
-          (w.w - (t.w || 0) > 120 || w.h - (t.h || 0) > 120)) return true
-    }
-  }
+  if (Math.min(postTarget.w, postTarget.h) < 24) return true
   return false
 }
 
 try {
-  if (active() !== requestedAddress) process.exit(0)
+  trace("ENTER " + requestedAddress.slice(-6))
+  if (active() !== requestedAddress) {
+    trace("BAIL " + requestedAddress.slice(-6) + " active=" + String(active()).slice(-6))
+    process.exit(0)
+  }
   // Concurrent applies interleave dispatches and race the repair cooldowns —
   // serialize so each run dispatches against the previous run's settled state.
   if (acquireLock(3000)) process.on("exit", releaseLock)
@@ -2329,8 +2435,7 @@ try {
       writeAnimSpeedState(animateSpeedMs)
     } catch (_) {}
   } else if (animSpeedState() > 0) {
-    revertWindowsMoveLeaf()
-    writeAnimSpeedState(0)
+    if (revertWindowsMoveLeaf()) writeAnimSpeedState(0)
   }
   const initial = snapshot()
   const previousWindow = previousAddress ? initial[previousAddress] : null
@@ -2352,11 +2457,20 @@ try {
     lua(Model.clearManagedFullscreenEval(previousAddress, previousMode))
   }
   if (!allowManagedMode(initial[requestedAddress], initial)) {
+    trace("SKIP-FULLSCREEN " + requestedAddress.slice(-6))
     emit("")
     process.exit(0)
   }
 
-  if (expandMode === "fullscreen") {
+  if (releaseLayout) {
+    // Freeze: the pointer sits off every window — hold all geometry and
+    // managed state exactly as it is; a release never resizes anything.
+    trace("RELEASE-BAIL " + requestedAddress.slice(-6))
+    emit("")
+    process.exit(0)
+  }
+
+  if (expandMode === "fullscreen" && !releaseLayout) {
     applyFullscreenMode()
     process.exit(0)
   }
@@ -2364,11 +2478,63 @@ try {
   lua(Model.clearOtherFullscreenEval(requestedAddress))
   let postClear = snapshot()
   if (targetWindow && !targetWindow.floating && layoutName(initial) === "dwindle") {
-    if (healDegenerate(targetWindow, postClear)) postClear = snapshot()
+    // Damage the size path cannot deliver out of is a broken tree, not a
+    // size problem: a leaf under a collapsed split re-damages after every
+    // ratio reset. Escalation ladder per window set: at most two flattens
+    // (15s apart), then one full mode-cycle rebuild, then nothing but the
+    // invisible rescue keeps nudging — damage that survives a rebuild is a
+    // wedge no dispatch reaches, and repeating visible restructures forever
+    // is worse than the wedge.
+    const damaged = damagedWindows(targetWindow, postClear)
+    let hasDamaged = false
+    for (const a in damaged) { hasDamaged = true; break }
+    if (hasDamaged) {
+      const pa = readPins()
+      const key = hyprctl + ":" + String(targetWindow.workspaceId)
+      const rec = pa[key] || {}
+      const spec = Object.keys(postClear).filter(a => {
+        const w = postClear[a]
+        return w && !w.floating && String(w.workspaceId) === String(targetWindow.workspaceId)
+      }).sort().join(",")
+      const sameSet = rec.flatSpec === spec
+      const flatN = sameSet ? (rec.flatN || 0) : 0
+      const bandN = sameSet ? (rec.bandN || 0) : 0
+      const rebN = sameSet ? (rec.rebN || 0) : 0
+      const rescN = sameSet ? (rec.rescN || 0) : 0
+      const since = Date.now() - (rec.flatAt || 0)
+      const keep = { spec: rec.spec, pins: rec.pins, flatSpec: spec, lean: rec.lean, rescN: rescN + 1 }
+      pa[key] = Object.assign(keep, { flatAt: rec.flatAt, flatN, bandN, rebN })
+      if (flatN < 2 && (!sameSet || since > 15000)) {
+        pa[key].flatAt = Date.now(); pa[key].flatN = flatN + 1
+        writePins(pa)
+        if (flattenWorkspaceTree(targetWindow, "damage", true)) postClear = snapshot()
+      } else if (rebN < 1 && since > 15000) {
+        pa[key].flatAt = Date.now(); pa[key].rebN = rebN + 1
+        writePins(pa)
+        if (rebuildWorkspaceTree(targetWindow, "damage")) postClear = snapshot()
+      } else if (bandN < 1 && since > 15000) {
+        // Columns demonstrably can't fit this set — siblings become bands,
+        // where the collapse floor is on the height axis and always fits.
+        // Terminal rung: bands must come last, since a later rebuild's
+        // mode-cycle would re-columize the tree and undo them.
+        pa[key].flatAt = Date.now(); pa[key].bandN = bandN + 1
+        writePins(pa)
+        if (bandNormalize(targetWindow, "damage")) postClear = snapshot()
+      } else writePins(pa)
+      // Budget handed to rescueNegatives: movetoroot escalation is allowed
+      // only for the first few damaged applies of a window set — past that
+      // the wedge has proven it relocates rather than heals, and only the
+      // invisible absolute resets keep running.
+      options._rescN = rescN
+    }
   }
 
   const current = postClear[requestedAddress]
   if (!Model.isActionable(current, includeFloating)) {
+    trace("SKIP-NONACTIONABLE " + requestedAddress.slice(-6) + " " + JSON.stringify(current && {
+      mapped: current.mapped, pinned: current.pinned, floating: current.floating,
+      w: current.w, h: current.h, pop: Model.hasTag(current, "pop")
+    }))
     // A target crushed non-positive (a togglesplit landing on a degenerate
     // tree) fails isActionable on size alone — rescue it directly so the
     // next apply sees an actionable window. rescueNegatives skips the
@@ -2404,7 +2570,7 @@ try {
     // lua:columns already stretches a lone column across the area via flex,
     // so managed maximize adds real fullscreen (and its take-over churn when
     // the next window opens) for zero visual difference.
-    if (!isFlatLuaLayout(layoutName(postClear))) {
+    if (!isLuaManagedLayout(layoutName(postClear))) {
       lua(Model.setManagedMaximizedEval(requestedAddress))
       // The eval re-verifies the sibling count atomically; if a new window
       // arrived between the snapshot and the dispatch it skips the maximize.
@@ -2421,193 +2587,378 @@ try {
       // Clear a stale managed fullscreen so a window pinned at fs=1 from an
       // older apply (or a dwindle workspace) tiles normally under columns.
       lua(Model.clearManagedFullscreenEval(requestedAddress, "maximized"))
-      applyLuaColumns(postClear, layoutName(postClear))
+      if (layoutName(postClear) === "lua:tree") applyLuaTree(postClear)
+      else applyLuaColumns(postClear, layoutName(postClear))
       emit("")
       process.exit(0)
     }
   }
 
   if (isFlatLuaLayout(layoutName(postClear))) {
-    applyLuaColumns(postClear, layoutName(postClear))
+    const flatOk = applyLuaColumns(postClear, layoutName(postClear))
+    if (!flatOk) trace("FLAT-NOOP " + requestedAddress.slice(-6))
+    emit("")
+    process.exit(0)
+  }
+
+  if (layoutName(postClear) === "lua:tree") {
+    const treeOk = applyLuaTree(postClear)
+    if (!treeOk) trace("TREE-NOOP " + requestedAddress.slice(-6))
     emit("")
     process.exit(0)
   }
 
   trace("APPLY " + requestedAddress.slice(-6))
-  if (!applyExactDwindle(postClear)) {
-    const fingerprints = new Set()
-    for (let pass = 0; pass < 20; pass++) {
-      const clients = pass === 0 ? postClear : snapshot()
-      const fingerprint = workspaceFingerprint(clients)
-      if (fingerprints.has(fingerprint)) break
-      fingerprints.add(fingerprint)
-      if (!applyOneLayoutPass(clients)) break
+  // A dwindle workspace arriving from another layout (scrolling's strip, a
+  // fresh workspace, manual splits) keeps a nested tree whose splits pin a
+  // sibling above the collapse floor — the seam ops cannot reach it and
+  // their clamped deltas crush windows into degenerate sizes before the
+  // repair ladder rebuilds the layout. The service marks a provider
+  // transition so the first apply afterwards flattens unconditionally;
+  // without a marker, flatten only when a sibling is provably unreachable —
+  // small slivers in a non-comb tree are converged output, not damage.
+  const preTarget = postClear[requestedAddress]
+  if (preTarget) {
+    const wsId = String(preTarget.workspaceId)
+    const marker = "/tmp/focus-now-transition-" + wsId.replace(/[^A-Za-z0-9]/g, "_")
+    let transitioned = false
+    try {
+      transitioned = fs.existsSync(marker)
+      if (transitioned) fs.unlinkSync(marker)
+    } catch (_) {}
+    if (transitioned) {
+      flattenWorkspaceTree(preTarget, "transition", true)
+      postClear = snapshot()
     }
   }
+  // Stability contract: emit exactly one resize batch per apply. Iterative
+  // convergence, seam probing (+40/-40 measure-undo cycles), and tree
+  // restructuring all read on screen as bouncing — a layout that lands once
+  // and approximately is correct; a layout still rearranging is not. Dwindle
+  // clamps absolute resizes against split ratios, so pinned siblings hold the
+  // collapse floor where the tree allows it and residue stays where it lands.
+  const baseTarget = postClear[requestedAddress]
+  if (baseTarget) try {
+    const targets = Model.layoutTargets(baseTarget, postClear, monitors(), options) || {}
+    const wsId = String(baseTarget.workspaceId)
+    // On a degenerate comb every leaf's absolute resize writes its parent
+    // split ratio, and a leaf's region is a product of all the ratios
+    // shallower than it — so a pin emitted before its shallower neighbours
+    // are final gets re-bounded by them and lands wherever the drift left
+    // it: scattered residue on the slivers and a starving deepest leaf
+    // squeezed to a zero/negative tile (a hidden window). Pins therefore
+    // run shallow-to-deep along the comb axis, and each pin is capped so
+    // the remainder can still fit every deeper leaf's share.
+    const members = Object.keys(targets).filter(a => {
+      const w = postClear[a]
+      return w && !w.floating && String(w.workspaceId) === wsId
+    })
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity
+    for (const a of members) {
+      const w = postClear[a]
+      xMin = Math.min(xMin, w.x); xMax = Math.max(xMax, w.x)
+      yMin = Math.min(yMin, w.y); yMax = Math.max(yMax, w.y)
+    }
+    let xHi = -Infinity, yHi = -Infinity
+    for (const a of members) {
+      const w = postClear[a]
+      xHi = Math.max(xHi, w.x + Math.max(0, w.w)); yHi = Math.max(yHi, w.y + Math.max(0, w.h))
+    }
+    const combAxis = (xHi - xMin) >= (yHi - yMin) ? "x" : "y"
+    members.sort((a, b) => postClear[a][combAxis] - postClear[b][combAxis])
+    const axisDim = combAxis === "x" ? "w" : "h"
+    const axisOf = w => Math.max(0, w[axisDim])
+    const lo = combAxis === "x" ? xMin : yMin
+    const hi = combAxis === "x" ? xHi : yHi
+    const span = Math.max(1, hi - lo)
+    // A leaf's planned share of the remainder is its axis target, or its
+    // current size when the model leaves that axis free; a damaged leaf is
+    // credited the collapse floor so the chain can't starve it again.
+    const shareOf = a => {
+      const t = targets[a], w = postClear[a]
+      if (t && t[axisDim] > 0) return t[axisDim]
+      return Math.max(axisOf(w), options.collapseSize)
+    }
+    const pin = (w, t, req) => 'hl.dispatch(' + Model.resizeCommand(
+      w.address,
+      combAxis === "x" ? req : (t.w > 0 ? t.w : w.w),
+      combAxis === "y" ? req : (t.h > 0 ? t.h : w.h),
+      false) + ')'
+    // Windows already at their target are skipped, and a target already
+    // attempted is never attempted again — re-pinning a converged leaf
+    // rewrites a split ratio the other boxes are products of, so a repeat
+    // apply on a settled layout must emit nothing even when residue sits
+    // off the model size.
+    const offTarget = (w, t) => (t.w > 0 && Math.abs(w.w - t.w) > 16) || (t.h > 0 && Math.abs(w.h - t.h) > 16)
+    const pinsAll = readPins()
+    // Spec is position-ordered along the comb axis: a movewindow reshuffles
+    // the tree into a new spec, which earns every member a fresh attempt
+    // budget — a slid-over window can expand again instead of holding the
+    // residue accepted for its old slot.
+    const spec = members.join(",")
+    const pinsKey = hyprctl + ":" + wsId
+    const prevRec = pinsAll[pinsKey] || {}
+    const pins = prevRec.spec === spec ? prevRec.pins : {}
+    // A target attempted twice is accepted wherever it landed: the clamps
+    // can't deliver it on this tree, and chasing it further only keeps the
+    // leaf moving. Ordinary residue is accepted after the first attempt;
+    // gross overshoot — where a sibling pin stole the region back — earns
+    // exactly one more attempt, always a shrink, never a rebound.
+    const oversized = (w, t) =>
+      (t.w > 0 && w.w > Math.max(t.w * 1.2, t.w + 30)) ||
+      (t.h > 0 && w.h > Math.max(t.h * 1.2, t.h + 30))
+    const recordOf = (a, t) => {
+      const p = pins[a]
+      return p && Math.abs(p.w - (t.w > 0 ? t.w : 0)) <= 4 && Math.abs(p.h - (t.h > 0 ? t.h : 0)) <= 4 ? p : null
+    }
+    const canPin = (a, w, t) => {
+      const p = recordOf(a, t)
+      if (!p) return true
+      if ((p.n || 1) >= 2) return false
+      return oversized(w, t)
+    }
+    const emittedReq = {}
+    const emit = (a, w, t, req, out) => {
+      const p = recordOf(a, t)
+      out.push(pin(w, t, req))
+      emittedReq[a] = req
+      pins[a] = { w: t.w > 0 ? t.w : 0, h: t.h > 0 ? t.h : 0, n: (p ? (p.n || 1) : 0) + 1 }
+    }
+    // Feasible share for order position i inside its remainder `rest`:
+    // never below the split's minimum, never above what leaves the deeper
+    // leaves' reserve intact. The deepest leaf is different: it shares the
+    // innermost split with its pair-mate, so `rest` is already its own
+    // carved-out share and it may additionally eat the pair-mate's slack
+    // down to the pair-mate's visibility floor — and no deeper, or the
+    // mate starves instead.
+    const reservesFor = ord => {
+      // Reserve only each deeper leaf's MINIMUM need: a collapsed sibling
+      // must fit its whole share, but an expanding leaf is happy to take
+      // whatever remainder is left — reserving its full target would
+      // squeeze the shallower pins to nothing. Plus ~12px of gap pads per
+      // leaf — the span has to buy a boundary for every leaf too, or the
+      // deepest one starves to a zero/negative tile (a hidden window).
+      const r = new Array(ord.length).fill(0)
+      for (let i = ord.length - 2; i >= 0; i--)
+        r[i] = r[i + 1] + Math.min(shareOf(ord[i + 1]), options.collapseSize) + 12
+      return r
+    }
+    const feasible = (ord, reserves, i, want, rest, prevReq) => {
+      if (i === ord.length - 1 && i > 0)
+        return Math.max(0, Math.min(want, rest + Math.max(0, (prevReq || 0) - DAMAGE_SIZE)))
+      const hiBound = Math.min(rest * 0.95, rest - reserves[i])
+      return Math.max(rest * 0.05, Math.min(want, hiBound))
+    }
+    const needy = i => {
+      const a = members[i], t = targets[a], w = postClear[a]
+      return !!(t && offTarget(w, t) && canPin(a, w, t))
+    }
+    let lean = prevRec.spec === spec ? prevRec.lean : null
+    let landed = null
+    const emitBoth = (a, t, rw, rh, out) => {
+      const p = recordOf(a, t || {})
+      out.push('hl.dispatch(' + Model.resizeCommand(a, rw, rh, false) + ')')
+      if (t) pins[a] = { w: t.w > 0 ? t.w : 0, h: t.h > 0 ? t.h : 0, n: (p ? (p.n || 1) : 0) + 1 }
+    }
+    if (!combGeom(postClear, wsId)) {
+      // Mixed band/column tree: comb ordering and the remainder/reserve
+      // math are meaningless here — leaf regions nest on different axes,
+      // and an expansion pin sized for a pure comb starves whatever shares
+      // its slot into a hidden zero/negative box. Siblings only ever get
+      // shrink-toward-target pins (a shrink frees space; it cannot starve
+      // a pair-mate). The focused window gets no pixel pin — on a mixed
+      // tree its region boundary isn't derivable, and overshooting it is
+      // what wedges a sibling; a genuinely stuck focused window is left
+      // for the movetoroot wedge recovery below.
+      const batch = []
+      for (const a of members) {
+        if (a === requestedAddress) continue
+        const w = postClear[a], t = targets[a]
+        if (!t || !canPin(a, w, t)) continue
+        // A leaf spanning most of an axis is a band/row member — its long
+        // edge is its slot, not a share to shrink toward the model's split.
+        const rw = w.w > (xHi - xMin) * 0.7 ? w.w : Math.min(t.w > 0 ? t.w : w.w, w.w)
+        const rh = w.h > (yHi - yMin) * 0.7 ? w.h : Math.min(t.h > 0 ? t.h : w.h, w.h)
+        if (Math.abs(w.w - rw) > 6 || Math.abs(w.h - rh) > 6) emitBoth(a, t, rw, rh, batch)
+      }
+      if (batch.length) lua(batch.join("; "))
+      landed = snapshot()
+    } else {
+    // Which way does this comb lean? The combs a flatten produces put the
+    // deepest leaf at the far end of the axis, but a tree built by hand or
+    // a layout transition can lean the other way — and pinning in the
+    // wrong direction re-bounds every leaf it already set. Detect it once
+    // per spec with the first pin that was needed anyway: a leaf's resize
+    // only moves leaves on its DEEP side, so the pin reveals which side
+    // that is. The lean then rides along in the pin record; repeat applies
+    // skip detection entirely.
+    if (!lean) {
+      const probeIdx = members.findIndex((a, i) => needy(i))
+      if (probeIdx >= 0) {
+        const a = members[probeIdx], w = postClear[a], t = targets[a]
+        let prest = span
+        for (let i = 0; i < probeIdx; i++) prest -= axisOf(postClear[members[i]])
+        const req = feasible(members, reservesFor(members), probeIdx, shareOf(a), prest,
+          probeIdx > 0 ? shareOf(members[probeIdx - 1]) : 0)
+        if (Math.abs(axisOf(w) - req) > 6) {
+          const probe = []
+          emit(a, w, t, req, probe)
+          lua(probe.join("; "))
+          const mid = snapshot()
+          let movedLower = 0, movedHigher = 0
+          for (let j = 0; j < members.length; j++) {
+            if (j === probeIdx) continue
+            const b = postClear[members[j]], m = mid[members[j]]
+            if (!b || !m) continue
+            const moved = Math.abs(m[combAxis] - b[combAxis]) > 2 || Math.abs(axisOf(m) - axisOf(b)) > 2
+            if (moved) { if (j > probeIdx) movedHigher++; else movedLower++ }
+          }
+          // A leaf's pin only ever moves leaves on its deep side — but the
+          // deepest leaf shares its ratio with its pair-mate and nudges
+          // exactly one leaf back toward the shallow end. All-higher moved
+          // means higher positions are deeper ("right" lean); all-lower
+          // moved means lower positions are deeper ("left"); a single
+          // moved pair-mate means the probe WAS the deepest leaf.
+          // Under a right lean every leaf deeper than the probe sits at a
+          // higher position and moves; a left lean moves all the lower
+          // positions. The deepest leaf only nudges its one pair-mate, so a
+          // partial move means the probe was that deep leaf.
+          const highCount = members.length - 1 - probeIdx
+          if (movedHigher > 0 && movedLower === 0)
+            lean = movedHigher === highCount ? "right" : "left"
+          else if (movedLower > 0 && movedHigher === 0)
+            lean = movedLower === probeIdx ? "left" : "right"
+          else lean = "right"
+        }
+      }
+      if (!lean) lean = "right"
+    }
+    // Pin shallow-to-deep: for a "right" lean the deepest leaf sits at the
+    // highest axis position, so the order is ascending; "left" mirrors.
+    const ord = lean === "left" ? members.slice().reverse() : members
+    const reserves = reservesFor(ord)
+    const batch = []
+    let rest = span, prevReq = 0
+    for (let i = 0; i < ord.length; i++) {
+      const a = ord[i], w = postClear[a], t = targets[a]
+      // The deepest leaf is never pinned: its expansion is free fill — every
+      // sibling pinned to its floor leaves the remainder for it. Requesting
+      // the deep leaf's expansion target directly asks dwindle for a pair
+      // ratio that devours the pair-mate, cascading into hidden windows.
+      // It still holds its minimum footprint in the remainder accounting.
+      // A focused window elsewhere in the comb keeps its feasible-bounded
+      // pin — under-delivery there is residue, not starvation.
+      if (a === requestedAddress && i === ord.length - 1) {
+        rest -= Math.min(shareOf(a), options.collapseSize) + 12
+        prevReq = 0
+        continue
+      }
+      if (emittedReq[a] != null) { rest -= emittedReq[a]; prevReq = emittedReq[a]; continue }
+      let req = feasible(ord, reserves, i, shareOf(a), rest, prevReq)
+      if (a === requestedAddress) {
+        // The expansion can only ever claim what the span leaves after
+        // every sibling's minimum share plus its gap pad — a bigger ask
+        // gets clamped against the whole subtree and starves a sibling
+        // into a hidden zero-size leaf.
+        let sibFloor = 0
+        for (const b of members)
+          if (b !== a) sibFloor += Math.min(shareOf(b), options.collapseSize) + 12
+        req = Math.min(req, Math.max(0, span - sibFloor))
+      }
+      if (t && offTarget(w, t) && canPin(a, w, t) && Math.abs(axisOf(w) - req) > 6)
+        emit(a, w, t, req, batch)
+      rest -= req
+      prevReq = req
+    }
+    if (batch.length) lua(batch.join("; "))
+    // One shrink-only corrective sweep — same two-attempt cap.
+    if (batch.length || Object.keys(emittedReq).length) {
+      const landed = snapshot()
+      const corrective = []
+      let crest = span, cprev = 0
+      for (let i = 0; i < ord.length; i++) {
+        const a = ord[i], t = targets[a], w = landed[a]
+        const req = feasible(ord, reserves, i, shareOf(a), crest, cprev)
+        if (t && w && oversized(w, t) && canPin(a, w, t) && emittedReq[a] == null)
+          emit(a, w, t, req, corrective)
+        crest -= w ? axisOf(w) : req
+        cprev = req
+      }
+      if (corrective.length) lua(corrective.join("; "))
+    }
+      landed = snapshot()
+    }
+    // A focused window that lands far under its expansion target is not
+    // residue — it is wedged under a collapsed parent and no pin reaches
+    // it. Reparent it to root (its ex-mates were already collapsed) and
+    // re-pin, bounded by the same attempt cap.
+    const landedFocus = landed[requestedAddress]
+    const ft = targets[requestedAddress]
+    if (landedFocus && ft) {
+      const underW = ft.w > 0 && landedFocus.w < ft.w - 200
+      const underH = ft.h > 0 && landedFocus.h < ft.h - 200
+      // Wedge recovery only when the rest of the layout actually converged —
+      // on an unresponsive tree every member misses its target, and a
+      // movetoroot there just reorders windows for nothing.
+      let siblingsConverged = false
+      for (const a of members) {
+        if (a === requestedAddress) continue
+        const t = targets[a], w = landed[a]
+        if (t && w && !offTarget(w, t)) { siblingsConverged = true; break }
+      }
+      const fp = recordOf(requestedAddress, ft)
+      // A focused window wedged to the collapse floor can't wait for the
+      // layout to converge around it — its movetoroot is the only op that
+      // ever frees it, so the convergence gate doesn't apply.
+      const hardWedge = axisOf(landedFocus) <= options.collapseSize + DAMAGE_SIZE ||
+        (ft[axisDim] > 0 && axisOf(landedFocus) < ft[axisDim] * 0.3)
+      if ((underW || underH) && (siblingsConverged || hardWedge) && (!fp || (fp.n || 1) < 2)) {
+        try {
+          lua('hl.dispatch(hl.dsp.focus({ window = "address:' + requestedAddress + '" })); hl.dispatch(hl.dsp.layout("movetoroot"))')
+          // After the reparent the focused leaf's pair is the whole sibling
+          // subtree — ask for at most what leaves every sibling its floor.
+          let sibFloor = 0
+          for (const a of members)
+            if (a !== requestedAddress) sibFloor += Math.min(shareOf(a), options.collapseSize) + 12
+          const bound = Math.max(axisOf(landedFocus), span - sibFloor)
+          const retry = []
+          emit(requestedAddress, landedFocus, ft,
+            ft[axisDim] > 0 ? Math.min(ft[axisDim], bound) : axisOf(landedFocus), retry)
+          if (retry.length) lua(retry.join("; "))
+        } catch (_) {}
+      }
+    }
+    // Collapse floors dwindle's clamps demonstrably can't deliver — a
+    // sibling sitting far above collapseSize after its pin attempts are
+    // spent — get the band fallback once per window set: the workspace
+    // switches to the flat rows layout, where every leaf is a band and
+    // the floor lands on the height axis. Bounded by bandN like the ladder.
+    let bandRan = false
+    if ((prevRec.bandN || 0) < 1 && targetWindow) {
+      const overCollapse = a => {
+        const t = targets[a], w = landed[a]
+        if (!t || !w || canPin(a, w, t)) return false
+        const lim = options.collapseSize * 2 + 16
+        return (t.w > 0 && t.w <= options.collapseSize + 24 && w.w > Math.max(t.w + 30, lim)) ||
+               (t.h > 0 && t.h <= options.collapseSize + 24 && w.h > Math.max(t.h + 30, lim))
+      }
+      if (members.some(a => a !== requestedAddress && overCollapse(a)))
+        bandRan = bandNormalize(targetWindow, "collapse")
+    }
+    pinsAll[pinsKey] = { spec, pins, lean, flatSpec: prevRec.flatSpec, flatAt: prevRec.flatAt, flatN: prevRec.flatN, bandN: bandRan ? 1 : prevRec.bandN, rebN: prevRec.rebN, rescN: prevRec.rescN }
+    writePins(pinsAll)
+  } catch (pinErr) {
+    try { trace("PINERR " + (pinErr && pinErr.stack || pinErr)) } catch (_) {}
+  }
+  // Real damage only: a window squeezed under the floor or negative gets an
+  // absolute reset — cosmetic residue is left exactly where it lands. No
+  // attempt cap: a hidden window must always be recovered, and a clamped
+  // resize on an invisible leaf is a silent no-op, never a visible move.
   let sliverCheck = snapshot()
   let sliverTarget = sliverCheck[requestedAddress]
-  // Repairs chain across applies only when a focus event fires — a wedged
-  // tree with no further events stays broken. Loop the repair block so deep
-  // damage converges within this run; per-window cooldowns keep each rung
-  // from re-firing inside the loop, so later rounds wait out the heal
-  // cooldown to retry windows the ladder could not fix on its first pass.
-  const testEnv = !!process.env.FOCUS_NOW_STATE
-  const repairDeadline = Math.min(Date.now() + 60000, RUN_DEADLINE_MS)
-  let lastWedgeKey = ""
-  let stallRounds = 0
-  for (let round = 0; sliverTarget && !sliverTarget.floating &&
-       layoutName(sliverCheck) === "dwindle"; round++) {
-    if (round > 0) {
-      if (Date.now() > repairDeadline || stallRounds >= 3) break
-      if (testEnv && round >= 4) break
-    }
-    // A round that changes nothing is waiting on per-window cooldowns —
-    // sleep them out. A round still making progress can run the next pass
-    // immediately; cooled tools simply stay skipped until they matter.
-    const roundFp = workspaceFingerprint(sliverCheck)
-    // The apply itself can leave siblings outside the collapse range —
-    // squeezed under the damage floor or pinned above it. Reorienting flips
-    // them to the axis that has room; healDegenerate stays as the fallback
-    // for damage reorient could not reach; healedRecently rate-limits repeat
-    // attempts so unrepairable nodes cannot loop it.
-    if (rescueNegatives(sliverTarget, sliverCheck)) sliverCheck = snapshot()
-    if (reorientCrampedRegions(sliverTarget, sliverCheck)) sliverCheck = snapshot()
-    if (reorientOversizedSlivers(sliverTarget, sliverCheck, postClear)) sliverCheck = snapshot()
-    const healed = healDegenerate(sliverTarget, sliverCheck)
-    if (healed === 2) {
-      // The workspace was rebuilt — converge the fresh tree now rather than
-      // leaving it for the next apply.
-      for (let pass = 0; pass < 6; pass++) {
-        if (!applyOneLayoutPass(snapshot())) break
-      }
-    }
-    if (healed) sliverCheck = snapshot()
-    equalizeCollapsedSlivers(sliverTarget)
-    // A focused window that still cannot expand past the damage floor means
-    // the tree is wedged in a shape the seam ops cannot reach — rebuild it
-    // and converge now. Over-limit siblings are convergence, not damage:
-    // they resolve through seam and equalize passes, so they never trigger.
-    const settled = snapshot()
-    const settledTarget = settled[requestedAddress]
-    if (!(settledTarget && !settledTarget.floating && layoutName(settled) === "dwindle")) break
-      const want = (Model.layoutTargets(settledTarget, settled, monitors(), options) || {})[requestedAddress]
-      const gapX = want && want.w > 0 ? want.w - settledTarget.w : 0
-      const gapY = want && want.h > 0 ? want.h - settledTarget.h : 0
-      const gap = Math.max(gapX, gapY)
-      // Buried = a sibling holds a bigger span on the axis the focused window
-      // needs. A merely under-target window gets no reorder — that is a
-      // non-converging layout, not a buried one.
-      const gapAxis = gapX >= gapY ? "w" : "h"
-      const focusedSpan = gapAxis === "w" ? settledTarget.w : settledTarget.h
-      const buried = gap > 160 && Object.keys(settled).some(a => {
-        const w = settled[a]
-        return a !== requestedAddress && w && !w.floating &&
-          String(w.workspaceId) === String(settledTarget.workspaceId) &&
-          (gapAxis === "w" ? w.w : w.h) >= focusedSpan - 16
-      })
-      // A sibling with both dims over the collapse floor is wedged inside a
-      // nested region the seams cannot shrink — same flatten escape applies.
-      const plump = Object.keys(settled).some(a => {
-        const w = settled[a]
-        return a !== requestedAddress && w && !w.floating &&
-          String(w.workspaceId) === String(settledTarget.workspaceId) &&
-          Math.min(w.w, w.h) > 90
-      })
-      if (Math.min(settledTarget.w, settledTarget.h) < 120 &&
-          rebuildWorkspaceTree(sliverTarget, "focused-stuck")) {
-        for (let pass = 0; pass < 6; pass++) {
-          if (!applyOneLayoutPass(snapshot())) break
-        }
-      } else if (buried && !combGeom(settled, settledTarget.workspaceId) &&
-          flattenWorkspaceTree(settledTarget, "buried gap=" + Math.round(gap))) {
-        // A focused window far under its target after the converge passes is
-        // buried inside a multi-member region — seams around it have no leaf
-        // controller on the axis it needs. movetoroot on just the focused
-        // window collapses its ex-mates into degenerate nodes, so flatten the
-        // whole workspace to a root-level comb, then re-converge.
-        for (let pass = 0; pass < 8; pass++) {
-          if (!applyOneLayoutPass(snapshot())) break
-        }
-      } else if (plump && gap > 160) {
-        // Plump siblings are collapse-feasible everywhere — shrink them
-        // straight to their model targets with absolute resizes rather than
-        // scrambling the tree or waiting on escalation cooldowns.
-        const targets2 = Model.layoutTargets(settledTarget, settled, monitors(), options) || {}
-        let shrank = false
-        for (const a in targets2) {
-          if (a === requestedAddress) continue
-          const w = settled[a], tw = targets2[a]
-          if (!w || !tw || w.floating || String(w.workspaceId) !== String(settledTarget.workspaceId)) continue
-          const sx = Math.max(0, w.w - (tw.w || 0))
-          const sy = Math.max(0, w.h - (tw.h || 0))
-          if (Math.max(sx, sy) > 120) {
-            // Absolute resize lands the sibling on its model target in one
-            // op — a clamped tree settles it at the region floor instead.
-            // Pin only the excess axis so shared-column members don't race.
-            lua('hl.dispatch(' + Model.resizeCommand(a,
-              sx > 120 && tw.w > 0 ? tw.w : w.w,
-              sy > 120 && tw.h > 0 ? tw.h : w.h, false) + ')')
-            shrank = true
-          }
-        }
-        if (shrank) {
-          for (let pass = 0; pass < 4; pass++) {
-            if (!applyOneLayoutPass(snapshot())) break
-          }
-        }
-      }
-      // Chain into another repair round while damage or a buried/stuck
-      // focused window remains — no event will arrive to retrigger one.
-      sliverCheck = snapshot()
-      sliverTarget = sliverCheck[requestedAddress]
-      let needsRound = false
-      if (sliverTarget && !sliverTarget.floating) {
-        for (const a in sliverCheck) {
-          const w = sliverCheck[a]
-          if (w && !w.floating && String(w.workspaceId) === String(sliverTarget.workspaceId) &&
-              (w.w < DAMAGE_SIZE || w.h < DAMAGE_SIZE)) { needsRound = true; break }
-        }
-        if (!needsRound) {
-          const t3 = Model.layoutTargets(sliverTarget, sliverCheck, monitors(), options) || {}
-          const w2 = t3[requestedAddress]
-          const g = Math.max(w2 && w2.w > 0 ? w2.w - sliverTarget.w : 0,
-                             w2 && w2.h > 0 ? w2.h - sliverTarget.h : 0)
-          // Takeable surplus: a sibling sits more than 120px above its own
-          // target. Both wedge shapes respond to this — non-comb via
-          // flatten, comb via the direct sibling-shrink rung.
-          const sibSurplus = g > 160 && Object.keys(sliverCheck).some(a => {
-            const w = sliverCheck[a], t = t3[a]
-            return a !== requestedAddress && w && t && !w.floating &&
-              String(w.workspaceId) === String(sliverTarget.workspaceId) &&
-              (w.w - (t.w || 0) > 120 || w.h - (t.h || 0) > 120)
-          })
-          needsRound = Math.min(sliverTarget.w, sliverTarget.h) < 120 ||
-            sibSurplus ||
-            (!combGeom(sliverCheck, sliverTarget.workspaceId) &&
-              Object.keys(sliverCheck).some(a => {
-                const w = sliverCheck[a]
-                return a !== requestedAddress && w && !w.floating &&
-                  String(w.workspaceId) === String(sliverTarget.workspaceId) &&
-                  Math.min(w.w, w.h) > 90
-              }))
-        }
-      }
-      if (!needsRound) break
-      // Stall detection: an identical damage+wedge set surviving consecutive
-      // rounds means no progress — but keep waiting while a needed tool is
-      // still cooling, since it can fire in a later round.
-      const wedgeKey = Object.keys(sliverCheck).filter(a => {
-        const w = sliverCheck[a]
-        return w && !w.floating && String(w.workspaceId) === String(sliverTarget.workspaceId) &&
-          (w.w < DAMAGE_SIZE || w.h < DAMAGE_SIZE || Math.min(w.w, w.h) > 90)
-      }).sort().join(",")
-      const flattenCooled = cooledRecently(FLATTEN_COOLDOWN_PATH, String(sliverTarget.workspaceId), FLATTEN_COOLDOWN_MS)
-      if (wedgeKey === lastWedgeKey && !flattenCooled) stallRounds++
-      else { stallRounds = 0; lastWedgeKey = wedgeKey }
-      // Only a no-change round waits on cooldowns — progress keeps going.
-      if (!testEnv && workspaceFingerprint(sliverCheck) === roundFp)
-        spawnSync("sleep", [String(HEAL_COOLDOWN_MS / 1000 + 0.2)])
-    }
+  if (sliverTarget && !sliverTarget.floating && layoutName(sliverCheck) === "dwindle") {
+    rescueNegatives(sliverTarget, sliverCheck)
+  }
   emit("", computeRepairPending())
 } catch (_) {
   process.exit(0)

@@ -68,8 +68,8 @@ test("config normalization covers every supported option", () => {
     timeout: "/usr/bin/timeout"
   })
   assert.deepEqual(normalized.columns, {
-    "2": { enabled: true, open: "vertical", mode: "columns" },
-    "special:scratchpad": { enabled: true, open: "horizontal", mode: "columns" }
+    "2": { enabled: true, open: "vertical", base: "dwindle", mode: "columns" },
+    "special:scratchpad": { enabled: true, open: "horizontal", base: "dwindle", mode: "columns" }
   })
 })
 

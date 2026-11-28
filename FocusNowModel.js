@@ -101,8 +101,12 @@ function stepCollapseSize(value, direction) {
   return clamp(normalizeCollapseSize(value) + (direction < 0 ? -1 : 1) * COLLAPSE_SIZE_STEP, COLLAPSE_SIZE_MIN, COLLAPSE_SIZE_MAX)
 }
 
-// Per-workspace columns-layout options keyed by workspace name
-// ("2", "special:scratchpad"). Each entry: { enabled, open:"horizontal"|"vertical" }.
+// Per-workspace layout presets keyed by workspace name ("2",
+// "special:scratchpad"). Each entry: { enabled, open:"horizontal"|"vertical",
+// base:"dwindle"|"scrolling"|"floating", mode:"mix"|"columns"|"rows" }.
+// `base` is the omarchy layout the workspace runs underneath; the mix/columns/
+// rows overlay only applies while base is dwindle — scrolling and floating
+// have no overlay.
 function normalizeColumns(source) {
   var result = {}
   if (!source || typeof source !== "object" || Array.isArray(source)) return result
@@ -110,10 +114,15 @@ function normalizeColumns(source) {
     if (typeof name !== "string" || !name) continue
     var entry = source[name]
     if (!entry || typeof entry !== "object") continue
+    var base = entry.base === "scrolling" || entry.base === "floating" ? entry.base : "dwindle"
     result[name] = {
       enabled: !!entry.enabled,
       open: entry.open === "vertical" ? "vertical" : "horizontal",
-      mode: entry.mode === "rows" ? "rows" : "columns"
+      base: base,
+      // A legacy enabled entry had no mode and meant the columns provider;
+      // only an explicit "mix"/"off" opt-out leaves the overlay on dwindle.
+      mode: entry.mode === "rows" || entry.mode === "columns" ? entry.mode
+          : (entry.mode === "mix" || entry.mode === "off") ? "mix" : "columns"
     }
   }
   return result
@@ -413,7 +422,7 @@ function assignStripTargets(windows, axis, span, minimum, out) {
   }
 }
 
-function axisTargets(focused, windows, mon, axis, multiplier, collapseSize) {
+function axisTargets(focused, windows, mon, axis, multiplier, collapseSize, release) {
   var pool = axisPool(focused, windows, axis)
   var strips = clusterStrips(pool, axis)
   if (!strips.length) return {}
@@ -432,9 +441,10 @@ function axisTargets(focused, windows, mon, axis, multiplier, collapseSize) {
   var otherMins = stripMins.filter(function(_, index) { return index !== focusedIndex })
   var otherMinSum = minSum - focusedMin
   var total = strips.length === 1 ? workArea : Math.max(currentSpan, minSum)
+  var share = multiplier
   var focusedTarget = strips.length === 1
     ? Math.round(total)
-    : Math.round(clamp(total * multiplier, focusedMin, Math.max(focusedMin, total - otherMinSum)))
+    : Math.round(clamp(total * share, focusedMin, Math.max(focusedMin, total - otherMinSum)))
   var shares = strips.length === 1 ? [] : distributeRemaining(
     strips.filter(function(_, index) { return index !== focusedIndex }),
     total - focusedTarget,
@@ -476,8 +486,8 @@ function layoutTargets(focused, byAddress, monitors, cfg) {
   if (!windows.length) return {}
   var monitor = monitorForWindow(focused, monitors)
   return mergeTargets(
-    axisTargets(focused, windows, monitor, "x", cfg.widthMultiplier, cfg.collapseSize),
-    axisTargets(focused, windows, monitor, "y", cfg.heightMultiplier, cfg.collapseSize)
+    axisTargets(focused, windows, monitor, "x", cfg.widthMultiplier, cfg.collapseSize, cfg.release),
+    axisTargets(focused, windows, monitor, "y", cfg.heightMultiplier, cfg.collapseSize, cfg.release)
   )
 }
 
@@ -648,6 +658,8 @@ function installHoverBridgeEval(includeFloating, refocus) {
   var appliedFollow = includeFloating ? 1 : '(active_workspace_floats() and 0 or 1)'
   return [
     'local bridge = rawget(_G, "focus_now_hover_bridge") or {}',
+    'if bridge.restore_scrolling_follow_focus == nil then bridge.restore_scrolling_follow_focus = hl.get_config("scrolling.follow_focus") end',
+    'hl.config({ scrolling = { follow_focus = false } })',
     'local function remove(subscription) if subscription then pcall(function() subscription:remove() end) end end',
     'remove(bridge.workspace_subscription); remove(bridge.monitor_subscription)',
     'if type(o) == "table" and bridge.workspace_mode and o.workspace_mode == bridge.wrapped_workspace_mode then o.workspace_mode = bridge.workspace_mode end',
@@ -674,6 +686,7 @@ function uninstallHoverBridgeEval(followMouse, refocus) {
     'if bridge and bridge.restore_mouse_refocus ~= nil then restore_refocus = bridge.restore_mouse_refocus end',
     'local restore_warps = false',
     'if bridge and bridge.restore_no_warps ~= nil then restore_warps = bridge.restore_no_warps end',
+    'if bridge and bridge.restore_scrolling_follow_focus ~= nil then hl.config({ scrolling = { follow_focus = bridge.restore_scrolling_follow_focus } }) end',
     'rawset(_G, "focus_now_hover_bridge", nil)',
     'hl.config({ input = { follow_mouse = restore_follow, mouse_refocus = restore_refocus }, cursor = { no_warps = restore_warps } })'
   ].join('; ')
